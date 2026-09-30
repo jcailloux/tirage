@@ -1,0 +1,17 @@
+# The daemon's socket (plan § 6). A site may encode once the tirage group is in
+# its unit's SupplementaryGroups. The socket stays open while the daemon
+# restarts, so that an upgrade loses no connection.
+
+[Unit]
+Description=tirage image encoding socket
+Documentation=https://github.com/jcailloux/tirage
+
+[Socket]
+ListenStream=/run/tirage/tirage.sock
+SocketGroup=tirage
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

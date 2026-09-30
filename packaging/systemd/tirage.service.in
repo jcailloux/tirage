@@ -1,0 +1,56 @@
+# tiraged, started by its socket (plan § 6). Its workers are its children: they
+# run in tirage.slice under the same sandbox, which tests/hardening/check.sh and
+# tests/package/check.sh try with real encodes.
+
+[Unit]
+Description=tirage image encoding daemon
+Documentation=https://github.com/jcailloux/tirage
+Requires=tirage.socket
+After=tirage.socket
+
+[Service]
+Type=exec
+ExecStart=@CMAKE_INSTALL_FULL_SBINDIR@/tiraged
+ExecReload=kill -HUP $MAINPID
+User=tirage
+Group=tirage
+Slice=tirage.slice
+Restart=on-failure
+# SIGTERM to the daemon alone: it answers its queue busy and waits for the
+# running worker, which may take up to timeout_s (120 s by default). Whatever
+# is left after that is killed.
+KillMode=mixed
+TimeoutStopSec=150
+
+# The socket comes from systemd, and neither the daemon nor libvips needs
+# anything beyond the files of the system.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RemoveIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+Also=tirage.socket

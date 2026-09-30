@@ -26,6 +26,42 @@ Run it in `debian:trixie-slim`, whose libheif leaks:
 The hardening checks (plan § 6) run the daemon, its workers and a caller under the sandboxing of
 their systemd units, as transient units of your user manager: `tests/hardening/check.sh .build/gcc`.
 
+## Package
+
+```sh
+packaging/build.sh                                        # builds and tests in debian:trixie-slim
+tests/package/check.sh .build/deb/tirage_0.1.0_amd64.deb  # installs it in a trixie container with systemd
+```
+
+`packaging/build.sh` runs the unit and integration tests in the container, then CPack makes
+`.build/deb/tirage_<version>_amd64.deb`. `tests/package/check.sh` installs it where systemd is the
+init and checks the units, the socket's group, a sandboxed caller, the slice, reload, a stop during an
+encode, an upgrade, removal and purge.
+
+On the server:
+
+```sh
+sudo apt install ./tirage_0.1.0_amd64.deb
+```
+
+The package installs `tiraged`, `tirage`, the worker (`/usr/libexec/tirage/tirage-worker`) and three
+units: `tirage.socket` (`/run/tirage/tirage.sock`, group `tirage`, mode 0660, enabled at once),
+`tirage.service` (started by the socket, as the `tirage` user, sandboxed) and `tirage.slice`
+(`CPUWeight=50`, memory ceiling of 12.5% and 17% of the machine). The first install writes
+`/etc/tirage/tirage.json` with half of the CPUs per encode, and no upgrade touches it again.
+Adjust the slice with `systemctl edit tirage.slice`, the configuration then `systemctl reload tirage`.
+
+A site may encode once its unit has the group:
+
+```ini
+[Service]
+SupplementaryGroups=tirage
+```
+
+Other distributions: `cmake --install` puts the same files under the prefix (units under
+`lib/systemd/system`), then create the user and group with `systemd-sysusers tirage.conf` and write the
+configuration yourself.
+
 ## Daemon
 
 ```sh
@@ -39,7 +75,7 @@ every key is optional and an unknown key is refused:
 ```json
 {
   "threads": 3,
-  "worker": "/usr/lib/tirage/tirage-worker",
+  "worker": "/usr/libexec/tirage/tirage-worker",
   "queue": { "interactive": 32, "background": 256 },
   "probe_limit": 2,
   "timeout_s": 120,

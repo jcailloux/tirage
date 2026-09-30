@@ -19,6 +19,11 @@
 #include "tirage/frame.h"
 #include "tirage/validate.h"
 
+// The build gives the installed worker's path (CMake, TIRAGE_DEFAULT_WORKER).
+#ifndef TIRAGE_DEFAULT_WORKER
+#define TIRAGE_DEFAULT_WORKER "tirage-worker"
+#endif
+
 namespace tirage::daemon {
 
 inline constexpr std::string_view kDefaultConfigPath = "/etc/tirage/tirage.json";
@@ -30,8 +35,9 @@ struct Config {
     // Where to listen when systemd does not hand over the socket. Read at start
     // only: a reload does not move the socket.
     std::string socket = std::string(kDefaultSocketPath);
-    // A path, or a bare name looked up in the PATH.
-    std::string worker = "tirage-worker";
+    // A path, or a bare name looked up in the PATH. By default, where the
+    // package installs it.
+    std::string worker = TIRAGE_DEFAULT_WORKER;
     QueueLimits queue;
     // Probes run outside the queue, at most this many at once.
     int probe_limit = 2;

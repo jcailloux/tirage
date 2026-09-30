@@ -407,7 +407,9 @@ TEST_CASE("refusals before and at decoding") {
     CHECK(run(p, "GIF89a\x01\x00\x01\x00").code == Code::unsupported_format);
 
     Profile png_only = p;
-    png_only.input.formats = {InputFormat::png};
+    // Not `= {InputFormat::png}`: GCC 14 at -O2 sees a bogus out-of-bounds copy
+    // when a one-element list replaces the four of `p` (-Warray-bounds).
+    png_only.input.formats.assign(1, InputFormat::png);
     CHECK(run(png_only, save(solid(8, 8, {0, 0, 0}), ".webp")).code == Code::unsupported_format);
 
     Profile tight = p;

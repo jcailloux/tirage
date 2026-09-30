@@ -1,24 +1,28 @@
 #!/bin/sh
-# Hardening checks (plan § 6, "Durcissement"), phase 3.
+# Hardening checks (plan § 6, "Durcissement"), phase 3, on the unit of phase 4.
 #
 # Runs tiraged, its workers and a caller under the sandboxing their systemd
 # units will have, as transient units of the user's systemd manager, and
 # encodes AVIF, WebP and JPEG through them:
-#   - the daemon is socket-activated (LISTEN_FDS), with PrivateNetwork=yes,
-#     MemoryDenyWriteExecute=yes and the rest of the service's settings: the
-#     workers are its children and inherit all of it;
+#   - the daemon is socket-activated (LISTEN_FDS), under the sandbox of
+#     packaging/systemd/tirage.service.in (PrivateNetwork=yes,
+#     MemoryDenyWriteExecute=yes, seccomp...): the workers are its children and
+#     inherit all of it;
 #   - the caller runs under ProtectSystem=strict and connects to a socket that
 #     lies on a mount read-only for it.
 #
-# Differences with the units of phase 4, forced by a user manager: the socket
-# is under $XDG_RUNTIME_DIR, not /run/tirage, and ProtectHome is read-only
-# rather than yes, because the binaries come from the build directory.
+# Differences with the real units, forced by a user manager: the socket is
+# under $XDG_RUNTIME_DIR, not /run/tirage, the daemon runs as you, and
+# ProtectHome is read-only rather than yes, because the binaries come from the
+# build directory. tests/package/check.sh tries those in a container, where
+# PrivateNetwork cannot apply: both checks are needed.
 #
 # Usage: tests/hardening/check.sh <build-dir>
 
 set -eu
 
 build=$(realpath "${1:?usage: $0 <build-dir>}")
+root=$(cd "$(dirname "$0")/../.." && pwd)
 for bin in tiraged tirage-worker tirage; do
     [ -x "$build/$bin" ] || { echo "missing $build/$bin" >&2; exit 2; }
 done
@@ -62,18 +66,23 @@ wXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEX9Np+KC/qLe0AAAAASUVORK5C
 YII=
 EOF
 
-# The service's sandbox, as § 6 plans it, plus the usual systemd-analyze
-# security settings, to learn now whether libvips and the codecs live with them.
+# The service's sandbox, read from the packaged unit so that both never drift
+# apart: every setting of its [Service] section but who runs it, how and in
+# which slice.
+props=$(sed -n '/^\[Service\]/,/^\[/p' "$root/packaging/systemd/tirage.service.in" \
+    | grep -E '^[A-Za-z]+=' \
+    | grep -vE '^(Type|ExecStart|ExecReload|User|Group|Slice|Restart|KillMode|TimeoutStopSec)=' \
+    | sed 's/^ProtectHome=yes$/ProtectHome=read-only/')
+set --
+old_ifs=$IFS
+IFS='
+'
+for p in $props; do set -- "$@" -p "$p"; done
+IFS=$old_ifs
 systemd-run --user --quiet --unit="$unit" \
     --socket-property=ListenStream="$dir/tirage.sock" \
     --socket-property=SocketMode=0660 \
-    -p ProtectSystem=strict -p ProtectHome=read-only -p PrivateTmp=yes \
-    -p PrivateNetwork=yes -p NoNewPrivileges=yes -p MemoryDenyWriteExecute=yes \
-    -p RestrictAddressFamilies=AF_UNIX -p RestrictNamespaces=yes -p RestrictRealtime=yes \
-    -p LockPersonality=yes -p SystemCallArchitectures=native \
-    -p SystemCallFilter=@system-service -p SystemCallFilter=~@privileged \
-    -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes \
-    "$build/tiraged" --config "$dir/tirage.json"
+    "$@" "$build/tiraged" --config "$dir/tirage.json"
 
 # The caller: a site under ProtectSystem=strict, without network, writing
 # only into its private /tmp.
@@ -104,6 +113,8 @@ printf '%s\n' "$journal" | grep -q "socket handed over by systemd" && a=ok || a=
 check "$a" "the daemon took its socket from systemd (PrivateNetwork=yes)"
 printf '%s\n' "$journal" | grep -q "result=failure" && a=no || a=ok
 check "$a" "no failure in the daemon's journal"
+printf '%s\n' "$journal" | grep -qE "proceeding without|ignoring namespace" && a=no || a=ok
+check "$a" "no sandbox setting left aside by systemd"
 
 if [ "$failed" != 0 ]; then
     echo "--- caller"; printf '%s\n' "$out"

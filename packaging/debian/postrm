@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+# The configuration was written by postinst, not shipped: purge removes it.
+# The user and group stay, as Debian keeps system users.
+if [ "$1" = purge ]; then
+    rm -f /etc/tirage/tirage.json
+    rmdir /etc/tirage 2>/dev/null || true
+fi

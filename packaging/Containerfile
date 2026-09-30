@@ -1,0 +1,9 @@
+# The package's builder (plan § 8): trixie, its GCC 14 and libvips 8.16, so that
+# the .deb links what the servers have. The AVIF encoder and the HEVC one are
+# there for the integration tests (the second makes the HEIC test image), dpkg-dev
+# and file for CPack's dependency lookup.
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ cmake ninja-build git ca-certificates pkg-config dpkg-dev file libvips-dev \
+        libheif-plugin-aomenc libheif-plugin-libde265 libheif-plugin-x265 \
+    && rm -rf /var/lib/apt/lists/*

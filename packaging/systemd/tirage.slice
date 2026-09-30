@@ -1,0 +1,15 @@
+# Every encode of the machine (plan § 6): the daemon and its workers, whichever
+# site asked. The sites come first when cores run short (CPUWeight=50 against
+# the default 100), and one memory ceiling holds all encodes at once, as a share
+# of the machine's memory: 1.5 and 2 GiB on 12 GiB, 1 and 1.4 GiB on 8.
+# Adjust with `systemctl edit tirage.slice`.
+
+[Unit]
+Description=tirage image encoding
+Documentation=https://github.com/jcailloux/tirage
+Before=slices.target
+
+[Slice]
+CPUWeight=50
+MemoryHigh=12.5%
+MemoryMax=17%

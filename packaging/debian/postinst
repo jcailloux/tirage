@@ -1,0 +1,34 @@
+#!/bin/sh
+# tirage's postinst (plan § 8): the user and group, a first configuration, and
+# the socket enabled on first install.
+set -e
+
+if [ "$1" = configure ]; then
+    systemd-sysusers tirage.conf
+
+    # Written once, never overwritten: an existing configuration is the
+    # administrator's. Half of the CPUs per encode (plan § 11), the rest for
+    # the sites.
+    if [ ! -e /etc/tirage/tirage.json ]; then
+        threads=$(( $(nproc) / 2 ))
+        [ "$threads" -ge 1 ] || threads=1
+        mkdir -p /etc/tirage
+        printf '{\n  "threads": %d\n}\n' "$threads" > /etc/tirage/tirage.json
+        chmod 0644 /etc/tirage/tirage.json
+    fi
+
+    if [ -z "$2" ]; then
+        # First install: enabled, even where systemd does not run (a chroot).
+        systemctl --no-reload enable tirage.socket >/dev/null 2>&1 || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        if [ -z "$2" ]; then
+            systemctl start tirage.socket
+        else
+            # An upgrade: the running daemon finishes its encode, answers its
+            # queue busy, and the socket keeps new connections for the new one.
+            systemctl try-restart tirage.service
+        fi
+    fi
+fi

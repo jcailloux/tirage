@@ -1,0 +1,8 @@
+# A trixie machine with systemd as its init (and D-Bus, for systemd-run --wait),
+# for tests/package/check.sh: the
+# package installs into it as on a server, its dependencies coming from apt.
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus procps \
+    && systemctl mask systemd-logind.service getty.target console-getty.service
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
