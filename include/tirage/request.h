@@ -39,8 +39,8 @@ struct Refusal {
     return out;
 }
 
-// Format by magic bytes, never by extension or declared type. HEIC is an ISO
-// BMFF file whose brands name HEVC; an AVIF file (AV1 brands) is not HEIC.
+// Format by magic bytes, never by extension or declared type. HEIC and AVIF are
+// both ISO BMFF files: their brands tell them apart, HEVC for HEIC, AV1 for AVIF.
 [[nodiscard]] inline std::optional<InputFormat> sniff(std::string_view bytes) {
     const auto at = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
     const std::size_t n = bytes.size();
@@ -52,17 +52,21 @@ struct Refusal {
         return InputFormat::webp;
 
     // ftyp box: size (4), "ftyp", major brand (4), minor version (4), compatible brands (4 each).
+    // The major brand decides, else the first compatible brand that names a codec.
     if (n >= 16 && bytes.substr(4, 4) == "ftyp") {
         const std::size_t box = (std::size_t{at(0)} << 24) | (std::size_t{at(1)} << 16) |
                                 (std::size_t{at(2)} << 8) | std::size_t{at(3)};
         const std::size_t end = std::min(box, n);
-        const auto hevc = [](std::string_view brand) {
-            return brand == "heic" || brand == "heix" || brand == "heim" || brand == "heis" ||
-                   brand == "hevc" || brand == "hevx";
+        const auto codec = [](std::string_view brand) -> std::optional<InputFormat> {
+            if (brand == "heic" || brand == "heix" || brand == "heim" || brand == "heis" ||
+                brand == "hevc" || brand == "hevx")
+                return InputFormat::heic;
+            if (brand == "avif" || brand == "avis") return InputFormat::avif;
+            return std::nullopt;
         };
-        if (hevc(bytes.substr(8, 4))) return InputFormat::heic;
+        if (auto f = codec(bytes.substr(8, 4))) return f;
         for (std::size_t i = 16; i + 4 <= end; i += 4)
-            if (hevc(bytes.substr(i, 4))) return InputFormat::heic;
+            if (auto f = codec(bytes.substr(i, 4))) return f;
     }
     return std::nullopt;
 }

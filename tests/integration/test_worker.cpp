@@ -595,3 +595,31 @@ TEST_CASE("HEIC from a phone: decoded, EXIF stripped") {
         CHECK(near(img, 100, 100, {30, 140, 60}, 12));
     }
 }
+
+TEST_CASE("AVIF in: a caller's own master, cropped and encoded again") {
+    // codiga keeps an AVIF master of each image, and derives the crops of its
+    // moderators from it.
+    const std::string avif = save(solid(640, 480, {200, 40, 30}), ".avif");
+    CHECK(run(profile(variant({320}, kAll)), avif).code == Code::unsupported_format);  // not listed
+
+    Profile p = profile(variant({320}, kAll));
+    p.input.formats = {InputFormat::avif};
+    Job job;
+    job.request = Request{.protocol = kProtocolVersion,
+                          .profile = p,
+                          .variants = {"v"},
+                          .crop = Crop{.x = 100, .y = 40, .width = 400, .height = 300, .unit = CropUnit::px},
+                          .input = avif};
+    job.threads = 2;
+    const auto r = direct::run(job, TIRAGE_WORKER_PATH);
+    REQUIRE(r.has_value());
+    REQUIRE_MESSAGE(r->error.empty(), r->error);
+    CHECK(r->source->format == InputFormat::avif);
+    CHECK(r->source->width == 640);
+    for (OutputFormat f : kAll) {
+        const VImage img = decode(output(*r, f).bytes);
+        CHECK(img.width() == 320);
+        CHECK(img.height() == 240);
+        CHECK(near(img, 100, 100, {200, 40, 30}, 12));
+    }
+}

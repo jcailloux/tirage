@@ -20,7 +20,8 @@ namespace tirage {
 // Current profile schema version. A profile with another version is refused.
 inline constexpr int kProfileVersion = 1;
 
-enum class InputFormat { png, jpeg, webp, heic };
+// A new format goes at the end: BEVE may number them in this order.
+enum class InputFormat { png, jpeg, webp, heic, avif };
 enum class OutputFormat { avif, webp, jpeg };
 enum class FloorPolicy { reject, warn };
 enum class Color { srgb, icc };
@@ -111,7 +112,7 @@ struct glz::meta<tirage::Chroma> {
 template <>
 struct glz::meta<tirage::InputFormat> {
     using enum tirage::InputFormat;
-    static constexpr auto value = glz::enumerate(png, jpeg, webp, heic);
+    static constexpr auto value = glz::enumerate(png, jpeg, webp, heic, avif);
 };
 
 template <>

@@ -63,8 +63,11 @@ TEST_CASE("sniff reads magic bytes") {
     CHECK_FALSE(sniff("").has_value());
     CHECK_FALSE(sniff("GIF89a").has_value());
     CHECK_FALSE(sniff("\x89PNG").has_value());  // truncated signature
-    // AVIF is ISO BMFF too, but not an accepted input.
-    CHECK_FALSE(sniff(ftyp("avif", {"mif1", "avif"})).has_value());
+    // AVIF is ISO BMFF too, told apart by its AV1 brands.
+    CHECK(sniff(ftyp("avif", {"mif1", "avif"})) == InputFormat::avif);
+    CHECK(sniff(ftyp("mif1", {"mif1", "avis"})) == InputFormat::avif);
+    CHECK(sniff(ftyp("avif", {"mif1", "miaf", "heic"})) == InputFormat::avif);  // the major brand decides
+    CHECK_FALSE(sniff(ftyp("mif1", {"mif1", "miaf"})).has_value());           // no codec named
     // A compatible brand past the end of the box does not count.
     std::string lying = ftyp("mif1", {"mif1"});
     lying += "heic";

@@ -49,6 +49,12 @@ cat > "$work/profile.json" <<'JSON'
  "variants": {"v": {"widths": [80], "formats": ["avif", "webp", "jpeg"],
                     "quality": [{"avif": 60, "webp": 80, "jpeg": 85}]}}}
 JSON
+# An AVIF in, as codiga sends its masters: its AV1 decoder comes with libheif1.
+cat > "$work/avif.json" <<'JSON'
+{"version": 1,
+ "input": {"formats": ["avif"]},
+ "variants": {"v": {"widths": [40], "formats": ["webp"], "quality": [{"webp": 80}]}}}
+JSON
 cat > "$work/slow.json" <<'JSON'
 {"version": 1,
  "input": {"formats": ["png"]},
@@ -91,6 +97,7 @@ out=$(site sh -c '
     cd /tmp
     tirage encode --profile /srv/site/profile.json out /srv/site/in.png >/dev/null && echo encode=0 || echo encode=$?
     for f in out/v-80.avif out/v-80.webp out/v-80.jpg; do [ -s "$f" ] && echo "file=$f"; done
+    tirage encode --profile /srv/site/avif.json again out/v-80.avif >/dev/null && [ -s again/v-40.webp ] && echo avif-in=0
     tirage probe --profile /srv/site/profile.json /srv/site/in.png >/dev/null && echo probe=0 || echo probe=$?
     tirage status >/dev/null && echo status=0 || echo status=$?
 ' 2>&1) || true
@@ -99,6 +106,7 @@ check "$(has encode=0)" "a site in the group encodes, under ProtectHome=yes"
 check "$(has file=out/v-80.avif)" "AVIF encoded by the packaged worker"
 check "$(has file=out/v-80.webp)" "WebP encoded"
 check "$(has file=out/v-80.jpg)" "JPEG encoded"
+check "$(has avif-in=0)" "an AVIF decoded, with the AV1 decoder libheif1 depends on"
 check "$(has probe=0)" "probe"
 check "$(has status=0)" "status"
 [ "$failed" = 0 ] || printf '%s\n' "$out"

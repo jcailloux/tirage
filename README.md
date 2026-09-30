@@ -30,7 +30,7 @@ their systemd units, as transient units of your user manager: `tests/hardening/c
 
 ```sh
 packaging/build.sh                                        # builds and tests in debian:trixie-slim
-tests/package/check.sh .build/deb/tirage_0.1.0_amd64.deb  # installs it in a trixie container with systemd
+tests/package/check.sh .build/deb/tirage_0.2.0_amd64.deb  # installs it in a trixie container with systemd
 ```
 
 `packaging/build.sh` runs the unit and integration tests in the container, then CPack makes
@@ -41,7 +41,7 @@ encode, an upgrade, removal and purge.
 On the server:
 
 ```sh
-sudo apt install ./tirage_0.1.0_amd64.deb
+sudo apt install ./tirage_0.2.0_amd64.deb
 ```
 
 The package installs `tiraged`, `tirage`, the worker (`/usr/libexec/tirage/tirage-worker`) and three

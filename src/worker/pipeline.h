@@ -56,7 +56,8 @@ inline VImage load(InputFormat format, std::string_view bytes) {
         case InputFormat::png: return VImage::pngload_buffer(blob, sequential());
         case InputFormat::jpeg: return VImage::jpegload_buffer(blob, sequential());
         case InputFormat::webp: return VImage::webpload_buffer(blob, sequential());
-        case InputFormat::heic: return VImage::heifload_buffer(blob, sequential());
+        case InputFormat::heic:
+        case InputFormat::avif: return VImage::heifload_buffer(blob, sequential());
     }
     throw vips::VError("unknown input format");
 }
