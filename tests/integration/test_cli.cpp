@@ -32,6 +32,7 @@ struct Printed {
     std::string error;
     int code = 0;
     std::optional<Source> source;
+    std::vector<Rect> masks;
     struct File {
         std::string variant;
         int width = 0;
@@ -119,6 +120,34 @@ TEST_CASE("cli: encode and probe through the daemon") {
     REQUIRE(p.source.has_value());
     CHECK(p.source->width == 64);
     CHECK(d.log().find("op=probe") != std::string::npos);
+}
+
+TEST_CASE("cli: masks, and their options checked") {
+    Daemon d;
+    write_inputs(d.dir());
+
+    const Run run = cli(d.dir(), d.socket(),
+                        {"encode", "--profile", "profile.json", "--mask", "0,0,10,10", "--mask", "500,0,100,1000",
+                         "--mask-unit", "permille", "--mask-style", "pixelate", "out", "in.png"});
+    REQUIRE_MESSAGE(run.code == 0, run.err);
+    const Printed p = printed(run);
+    CHECK(p.error.empty());
+    REQUIRE(p.masks.size() == 2);
+    CHECK((p.masks[1].x == 32 && p.masks[1].width == 6 && p.masks[1].height == 48));  // of 64x48
+    CHECK(fs::exists(d.dir() / "out/small-32.webp"));
+
+    const auto usage = [&](std::vector<std::string> args) {
+        args.insert(args.begin(), {"encode", "--profile", "profile.json"});
+        args.insert(args.end(), {"out", "in.png"});
+        return cli(d.dir(), d.socket(), args).code;
+    };
+    CHECK(usage({"--mask", "0,0,10,10"}) == 2);                                   // no unit
+    CHECK(usage({"--mask-unit", "px"}) == 2);                                     // no mask
+    CHECK(usage({"--mask", "0,0,10", "--mask-unit", "px"}) == 2);                 // three numbers
+    CHECK(usage({"--mask", "0,0,10,10", "--mask-unit", "px", "--mask-style", "erase"}) == 2);
+    CHECK(cli(d.dir(), d.socket(), {"probe", "--profile", "profile.json", "--mask", "0,0,1,1", "--mask-unit", "px",
+                                    "in.png"})
+              .code == 2);
 }
 
 TEST_CASE("cli: a refusal is printed with exit code 0, busy exits 75, no daemon exits 1") {

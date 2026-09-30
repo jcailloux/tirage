@@ -8,12 +8,14 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <vips/vips8>
@@ -130,12 +132,13 @@ Profile profile(Variant v) {
 }
 
 Response run(const Profile& p, std::string input, Operation op = Operation::encode,
-             std::optional<Crop> crop = std::nullopt) {
+             std::optional<Crop> crop = std::nullopt, std::vector<Mask> masks = {}) {
     Job job;
     job.request = Request{.protocol = kProtocolVersion,
                           .operation = op,
                           .profile = p,
                           .crop = crop,
+                          .masks = std::move(masks),
                           .input = std::move(input)};
     if (op == Operation::encode)
         for (const auto& [name, _] : p.variants) job.request.variants.push_back(name);
@@ -149,6 +152,25 @@ Response encoded(const Profile& p, std::string input) {
     Response r = run(p, std::move(input));
     REQUIRE_MESSAGE(r.error.empty(), r.error);
     return r;
+}
+
+// A JPEG output close enough to its source to compare pixels: quality 100, 4:4:4.
+Profile exact_jpeg(int width) {
+    Variant v = variant({width}, {OutputFormat::jpeg}, 100);
+    v.encoding = Encoding{.jpeg = JpegEncoding{.chroma = Chroma::s444}};
+    return profile(v);
+}
+
+Mask mask(int x, int y, int w, int h, MaskStyle style) {
+    return Mask{.x = x, .y = y, .width = w, .height = h, .unit = CropUnit::px, .style = style};
+}
+
+// Mean of each band over an area.
+std::vector<double> mean(const VImage& img, int x, int y, int w, int h) {
+    const VImage area = img.extract_area(x, y, w, h);
+    std::vector<double> out;
+    for (int b = 0; b < area.bands(); ++b) out.push_back(area.extract_band(b).avg());
+    return out;
 }
 
 const Output& output(const Response& r, OutputFormat f, int width = 0) {
@@ -373,6 +395,136 @@ TEST_CASE("a crop in permille, applied to the oriented image") {
     CHECK(r.outputs[0].width == 400);
     CHECK(r.outputs[1].width == 500);  // 800 capped to the crop
     CHECK(decode(r.outputs[1].bytes).height() == 500);
+}
+
+TEST_CASE("masks: filled where the oriented image says, whatever the EXIF orientation") {
+    // Two ramps, so that a zone misplaced by the orientation has another mean.
+    const VImage xy = VImage::xyz(120, 80);
+    const VImage stored = (xy[0] * 2).bandjoin(xy[1] * 3).bandjoin(xy[0] * 0 + 128)
+                              .cast(VIPS_FORMAT_UCHAR)
+                              .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_sRGB));
+    const int zx = 10, zy = 20, zw = 30, zh = 25;  // fits 120x80 and 80x120
+
+    for (int o = 1; o <= 8; ++o) {
+        CAPTURE(o);
+        VImage tagged = stored.copy();
+        tagged.set("orientation", o);
+        const std::string jpeg =
+            save(tagged, ".jpg", VImage::option()->set("Q", 100)->set("subsample_mode", VIPS_FOREIGN_SUBSAMPLE_OFF));
+        const VImage oriented = decode(jpeg).autorot();
+
+        const Response r = run(exact_jpeg(oriented.width()), jpeg, Operation::encode, std::nullopt,
+                               {mask(zx, zy, zw, zh, MaskStyle::fill)});
+        REQUIRE_MESSAGE(r.error.empty(), r.error);
+        REQUIRE(r.masks.size() == 1);
+        CHECK((r.masks[0].x == zx && r.masks[0].y == zy && r.masks[0].width == zw && r.masks[0].height == zh));
+        const VImage out = decode(r.outputs.at(0).bytes);
+        REQUIRE(out.width() == oriented.width());
+
+        const std::vector<double> m = mean(oriented, zx, zy, zw, zh);
+        using P = std::pair<int, int>;
+        for (const auto& [x, y] : {P{zx, zy}, P{zx + zw - 1, zy + zh - 1}, P{zx + 15, zy + 12}})
+            CHECK_MESSAGE(near(out, x, y, m, 4), x, ",", y, ": ", pixel_text(out, x, y));
+        // Around the zone, the image as it was.
+        for (const auto& [x, y] : {P{zx - 2, zy + 12}, P{zx + zw + 1, zy}, P{zx, zy + zh + 1}})
+            CHECK_MESSAGE(near(out, x, y, oriented.getpoint(x, y), 6), x, ",", y, ": ", pixel_text(out, x, y));
+    }
+}
+
+TEST_CASE("masks: blur and pixelate leave no detail, the rest keeps it") {
+    // A checkerboard of single pixels: all detail, no shape.
+    const VImage xy = VImage::xyz(240, 100);
+    const VImage checker = ((((xy[0] + xy[1]) % 2) * 255).cast(VIPS_FORMAT_UCHAR))
+                               .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_B_W));
+    const Response r = run(exact_jpeg(240), save(checker, ".png"), Operation::encode, std::nullopt,
+                           {mask(10, 10, 60, 40, MaskStyle::blur), mask(90, 10, 60, 40, MaskStyle::pixelate),
+                            mask(170, 10, 60, 40, MaskStyle::fill)});
+    REQUIRE_MESSAGE(r.error.empty(), r.error);
+    const VImage out = decode(r.outputs.at(0).bytes);
+    for (int x : {10, 90, 170}) {
+        CAPTURE(x);
+        CHECK(out.extract_area(x, 10, 60, 40).deviate() < 10);
+        CHECK(std::abs(out.extract_area(x, 10, 60, 40).avg() - 127.5) < 10);
+    }
+    CHECK(out.extract_area(10, 60, 220, 30).deviate() > 100);
+
+    // Pixelate makes blocks of 8 (60 / 8, rounded up) on a ramp: flat inside a
+    // block, a step between two.
+    const Response ramp = run(exact_jpeg(256), save(grey_ramp(256, 32), ".png"), Operation::encode,
+                              std::nullopt, {mask(0, 0, 64, 16, MaskStyle::pixelate)});
+    REQUIRE_MESSAGE(ramp.error.empty(), ramp.error);
+    const VImage steps = decode(ramp.outputs.at(0).bytes);
+    const auto at = [&](int x) { return steps.getpoint(x, 8)[0]; };
+    CHECK(std::abs(at(9) - at(14)) <= 2);
+    CHECK(std::abs(at(17) - at(14) - 8) <= 3);
+    CHECK(std::abs(at(70) - 70) <= 3);  // past the zone, the ramp itself
+}
+
+TEST_CASE("masks: overlapping zones, each style, hide their whole union") {
+    // Drawn in order: the second reads the first's result where they overlap,
+    // and only its own zone, so nothing of the original comes back.
+    const VImage xy = VImage::xyz(300, 160);
+    const VImage checker = ((((xy[0] + xy[1]) % 2) * 255).cast(VIPS_FORMAT_UCHAR))
+                               .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_B_W));
+    for (MaskStyle style : {MaskStyle::blur, MaskStyle::pixelate, MaskStyle::fill}) {
+        CAPTURE(static_cast<int>(style));
+        const Response r = run(exact_jpeg(300), save(checker, ".png"), Operation::encode, std::nullopt,
+                               {mask(20, 20, 150, 80, style), mask(100, 60, 150, 80, style)});
+        REQUIRE_MESSAGE(r.error.empty(), r.error);
+        const VImage out = decode(r.outputs.at(0).bytes);
+        CHECK(out.extract_area(20, 20, 150, 80).deviate() < 10);
+        CHECK(out.extract_area(100, 60, 150, 80).deviate() < 10);
+        CHECK(out.extract_area(100, 60, 70, 40).deviate() < 10);  // the overlap
+        // Outside the union, the checkerboard itself.
+        CHECK(out.extract_area(20, 100, 80, 60).deviate() > 100);
+        CHECK(out.extract_area(250, 0, 50, 160).deviate() > 100);
+    }
+}
+
+TEST_CASE("masks on RGBA: transparent pixels lend no colour") {
+    // Red on the right half, transparent black on the left: filled as a whole,
+    // premultiplied, the mean stays red with half the opacity.
+    const VImage red = solid(200, 100, {255, 0, 0});
+    const VImage rgba = (red * right_half_alpha(200, 100) / 255)
+                            .cast(VIPS_FORMAT_UCHAR)
+                            .bandjoin(right_half_alpha(200, 100))
+                            .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_sRGB));
+    const Response r = run(profile(variant({200}, {OutputFormat::webp}, 100)), save(rgba, ".png"),
+                           Operation::encode, std::nullopt, {mask(0, 0, 200, 100, MaskStyle::fill)});
+    REQUIRE_MESSAGE(r.error.empty(), r.error);
+    const VImage out = decode(r.outputs.at(0).bytes);
+    CHECK_MESSAGE(near(out, 30, 50, {255, 0, 0, 128}, 8), pixel_text(out, 30, 50));
+    CHECK_MESSAGE(near(out, 170, 50, {255, 0, 0, 128}, 8), pixel_text(out, 170, 50));
+}
+
+TEST_CASE("masks: with the crop, metadata dropped, a mask outside the image warned") {
+    VImage tagged = solid(600, 400, {90, 90, 90}).copy();
+    tagged.set("orientation", 1);
+    const std::string jpeg = save(tagged, ".jpg");
+    REQUIRE(has_exif(decode(jpeg)));
+
+    Profile p = profile(variant({600}, {OutputFormat::jpeg}));
+    p.metadata = Metadata::keep;
+    const Crop crop{.x = 100, .y = 0, .width = 200, .height = 400, .unit = CropUnit::px};
+    const Response r = run(p, jpeg, Operation::encode, crop,
+                           {mask(50, 50, 100, 100, MaskStyle::blur), mask(600, 0, 10, 10, MaskStyle::blur)});
+    REQUIRE_MESSAGE(r.error.empty(), r.error);
+    // Masks are on the original, the crop cuts the first one.
+    REQUIRE(r.masks.size() == 2);
+    CHECK((r.masks[0].x == 50 && r.masks[0].width == 100));
+    CHECK((r.masks[1].width == 0 && r.masks[1].height == 0));
+    const VImage out = decode(r.outputs.at(0).bytes);
+    CHECK(out.width() == 200);
+    CHECK_FALSE(has_exif(out));
+
+    const auto warned = [&](std::string_view start) {
+        return std::ranges::any_of(r.warnings, [&](const std::string& w) { return w.starts_with(start); });
+    };
+    CHECK(warned("masks[1]: no pixel of the image"));
+    CHECK(warned("masks: metadata not kept"));
+
+    // Without masks, the same profile keeps the EXIF.
+    CHECK(has_exif(decode(encoded(p, jpeg).outputs.at(0).bytes)));
 }
 
 TEST_CASE("probe answers without encoding") {

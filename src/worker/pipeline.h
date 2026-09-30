@@ -1,7 +1,7 @@
 #pragma once
 
 // The libvips side of tirage-worker: decode, orient, bound, crop, convert the
-// colour, resize and encode (plan § 3 and § 7).
+// colour, mask, resize and encode (plan § 3, § 4 and § 7).
 //
 // Ported from codiga (~/Projets/codiga/api/src/media/ingest.h, derive.h and
 // fleet/images.h), whose choices are measured there: Lanczos3, autorot before
@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -132,6 +133,69 @@ inline int keep_flags(const Profile& p) {
     return flags;
 }
 
+// Each cell of bw x bh pixels takes its mean colour. The last row and column
+// of cells are completed by repeating the zone's edge.
+inline VImage cells(const VImage& zone, int bw, int bh) {
+    const int w = zone.width(), h = zone.height();
+    const int cw = (w + bw - 1) / bw, ch = (h + bh - 1) / bh;
+    return zone.embed(0, 0, cw * bw, ch * bh, VImage::option()->set("extend", VIPS_EXTEND_COPY))
+        .shrink(bw, bh)
+        .zoom(bw, bh)
+        .extract_area(0, 0, w, h);
+}
+
+// Blurred at 32 pixels on the zone's longer side, then brought back to its
+// size: the same look at any resolution, and a small kernel on a large zone.
+// codiga's editor previews it with the same constants (plan § 7).
+inline VImage blurred(const VImage& zone) {
+    constexpr double kSide = 32;
+    const int w = zone.width(), h = zone.height();
+    const double scale = std::min(1.0, kSide / std::max(w, h));
+    VImage small = scale < 1 ? zone.resize(scale) : zone;
+    small = small.gaussblur(std::max(1.0, std::max(small.width(), small.height()) / 8.0));
+    if (small.width() == w && small.height() == h) return small;
+    return small
+        .resize(static_cast<double>(w) / small.width(),
+                VImage::option()
+                    ->set("vscale", static_cast<double>(h) / small.height())
+                    ->set("kernel", VIPS_KERNEL_LINEAR))
+        .embed(0, 0, w, h, VImage::option()->set("extend", VIPS_EXTEND_COPY));
+}
+
+// What replaces a zone. Premultiplied when there is an alpha channel, like
+// resize_to, so that transparent pixels lend no colour.
+inline VImage hidden(const VImage& zone, MaskStyle style) {
+    const bool alpha = zone.has_alpha();
+    const VImage in = alpha ? zone.premultiply() : zone;
+    VImage out;
+    switch (style) {
+        case MaskStyle::blur: out = blurred(in); break;
+        case MaskStyle::pixelate: {
+            const int block = pixelate_block(in.width(), in.height());
+            out = cells(in, block, block);
+            break;
+        }
+        case MaskStyle::fill: out = cells(in, in.width(), in.height()); break;
+    }
+    if (alpha) out = out.unpremultiply();
+    return out.cast(zone.format());
+}
+
+// Draws the masks into `img`, the in-memory copy, still as stored. `zones` are
+// the masks resolved on the oriented image, in their order: each is moved to
+// the stored image (to_stored) and replaced in place. Only the zone's pixels
+// are read, and nothing is copied but the zone.
+inline void draw_masks(VImage& img, const std::vector<Mask>& masks, const std::vector<Rect>& zones) {
+    const int orientation = vips_image_get_orientation(img.get_image());
+    for (std::size_t i = 0; i < masks.size(); ++i) {
+        if (zones[i].width == 0) continue;
+        const Rect z = to_stored(zones[i], orientation, img.width(), img.height());
+        // In memory before drawing: the patch is read from the image it goes into.
+        const VImage patch = hidden(img.extract_area(z.x, z.y, z.width, z.height), masks[i].style).copy_memory();
+        img.draw_image(patch, z.x, z.y);
+    }
+}
+
 inline int subsample(Chroma c) {
     return c == Chroma::s420 ? VIPS_FOREIGN_SUBSAMPLE_ON : VIPS_FOREIGN_SUBSAMPLE_OFF;
 }
@@ -236,6 +300,17 @@ inline std::string encode(const VImage& img, OutputFormat format, int quality,
         if (!detail::needs_16bit(profile, req.variants)) img = detail::to_8bit(img);
         img = img.copy_memory();
 
+        // Masks, drawn into that copy before anything is resized from it: no
+        // output ever holds a zone's pixels.
+        if (!req.masks.empty()) {
+            for (std::size_t i = 0; i < req.masks.size(); ++i) {
+                out.masks.push_back(resolve_mask(req.masks[i], width, height));
+                if (out.masks.back().width == 0)
+                    out.warnings.push_back(std::format("masks[{}]: no pixel of the image, nothing hidden", i));
+            }
+            detail::draw_masks(img, req.masks, out.masks);
+        }
+
         // Orientation and crop, on the copy in memory. autorot also removes the
         // orientation tag, so that no output gets rotated a second time.
         work = img.autorot();
@@ -246,7 +321,13 @@ inline std::string encode(const VImage& img, OutputFormat format, int quality,
         return r;
     }
 
-    const int keep = detail::keep_flags(profile);
+    int keep = detail::keep_flags(profile);
+    // EXIF may hold a thumbnail of the original, XMP too: a masked image keeps
+    // its ICC profile only.
+    if (!req.masks.empty() && (keep & ~VIPS_FOREIGN_KEEP_ICC)) {
+        keep &= VIPS_FOREIGN_KEEP_ICC;
+        out.warnings.push_back("masks: metadata not kept, it may hold a thumbnail of the original");
+    }
     try {
         for (const std::string& name : req.variants) {
             const Variant& variant = profile.variants.at(name);

@@ -103,6 +103,15 @@ export TIRAGE_SOCKET=/tmp/tirage.sock   # else /run/tirage/tirage.sock
 .build/gcc/tirage status
 ```
 
+Masks hide zones before anything is resized (a user name, an avatar): `--mask x,y,w,h`, as many as
+needed (32 at most), with `--mask-unit px|permille` and `--mask-style blur|pixelate|fill` (blur by
+default). Their coordinates are on the oriented original, like the crop's. A masked image never
+keeps its EXIF, XMP or IPTC, which may hold a thumbnail of the original.
+
+```sh
+.build/gcc/tirage encode --profile profile.json --mask 40,12,220,30 --mask 20,60,64,64 --mask-unit px out/ shot.png
+```
+
 `encode` writes `<variant>-<width>.<ext>` into the output directory and prints a JSON report. A
 refusal is that report with a non-empty `error` and exit code 0. Busy exits 75 (try again later), a
 failure exits 1, bad arguments exit 2.

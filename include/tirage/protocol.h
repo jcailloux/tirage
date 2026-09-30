@@ -7,6 +7,7 @@
 // Checking a request is request.h. On the wire it is BEVE (glaze), which carries
 // the input and output bytes as they are.
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -38,6 +39,29 @@ struct Crop {
     std::optional<CropUnit> unit;  // required, checked by validate_request
 };
 
+// How a mask hides its zone. Every style reads only the zone's own pixels, and
+// is scaled to the zone's size, so that its strength never depends on the
+// original's resolution:
+// - blur: a Gaussian blur, strong enough to leave shapes and no detail;
+// - pixelate: blocks of one colour, 8 along the zone's longer side;
+// - fill: one colour, the zone's mean.
+enum class MaskStyle { blur, pixelate, fill };
+
+// A zone to hide (a user name, an avatar), on the oriented image like the
+// crop, and before it: a zone reaching outside the crop is only partly seen.
+// Its unit is required for the same reason as the crop's.
+struct Mask {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    std::optional<CropUnit> unit;  // required, checked by validate_request
+    MaskStyle style = MaskStyle::blur;
+};
+
+// Bound on the number of masks of one request.
+inline constexpr std::size_t kMaxMasks = 32;
+
 struct Request {
     int protocol = 0;
     Operation operation = Operation::encode;
@@ -45,6 +69,7 @@ struct Request {
     Profile profile;
     std::vector<std::string> variants;  // encode: the variants to produce, in this order
     std::optional<Crop> crop;
+    std::vector<Mask> masks;  // encode only, applied in this order
     // Encode only: milliseconds from the moment the daemon has read the request.
     // A job still queued past it is dropped (Busy, deadline). Relative, so that
     // the caller's and the daemon's clocks never have to agree. Once started, a
@@ -99,6 +124,7 @@ struct Response {
     std::vector<std::string> warnings;
     std::optional<Source> source;  // absent when refused before decoding
     std::optional<Rect> crop;      // the crop actually applied, once clamped
+    std::vector<Rect> masks;       // each mask as applied, in pixels, empty when outside the image
     std::vector<Output> outputs;   // encode only: variant order, then width, then format
 };
 
@@ -207,6 +233,12 @@ template <>
 struct glz::meta<tirage::CropUnit> {
     using enum tirage::CropUnit;
     static constexpr auto value = glz::enumerate(px, permille);
+};
+
+template <>
+struct glz::meta<tirage::MaskStyle> {
+    using enum tirage::MaskStyle;
+    static constexpr auto value = glz::enumerate(blur, pixelate, fill);
 };
 
 // tirage::Code has no meta on purpose: glaze writes it as its number.

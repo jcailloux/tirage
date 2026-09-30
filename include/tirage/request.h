@@ -1,7 +1,7 @@
 #pragma once
 
 // Request checks and the decisions a worker takes before touching a pixel
-// (plan § 3 and § 4): format sniffing, safety bounds, crop and floor.
+// (plan § 3 and § 4): format sniffing, safety bounds, crop, masks and floor.
 //
 // Pure logic, no libvips, like validate.h: the daemon runs validate_request
 // before queueing, the worker runs everything again (direct mode goes around
@@ -10,11 +10,13 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 
 #include "tirage/profile.h"
@@ -65,7 +67,8 @@ struct Refusal {
     return std::nullopt;
 }
 
-// Checks a request before it is queued: protocol, profile, variants, crop.
+// Checks a request before it is queued: protocol, profile, variants, crop,
+// masks.
 [[nodiscard]] inline std::optional<Refusal> validate_request(const Request& r,
                                                              const Bounds& daemon = kDefaultBounds) {
     const auto invalid = [](std::string message) {
@@ -95,13 +98,29 @@ struct Refusal {
         return invalid("variants: probe encodes nothing, they would be ignored");
     }
 
-    if (const auto& c = r.crop) {
-        if (!c->unit) return invalid("crop.unit: required (\"px\" or \"permille\")");
-        if (c->x < 0 || c->y < 0) return invalid("crop: x and y must not be negative");
-        if (c->width <= 0 || c->height <= 0) return invalid("crop: width and height must be positive");
-        if (*c->unit == CropUnit::permille &&
-            (c->x > 1000 || c->y > 1000 || c->width > 1000 || c->height > 1000))
-            return invalid("crop: permille values are at most 1000");
+    // The crop and every mask are rectangles with the same rules.
+    const auto check_area = [&](const std::string& path, int x, int y, int width, int height,
+                                const std::optional<CropUnit>& unit) -> std::optional<Refusal> {
+        if (!unit) return invalid(path + ".unit: required (\"px\" or \"permille\")");
+        if (x < 0 || y < 0) return invalid(path + ": x and y must not be negative");
+        if (width <= 0 || height <= 0) return invalid(path + ": width and height must be positive");
+        if (*unit == CropUnit::permille && (x > 1000 || y > 1000 || width > 1000 || height > 1000))
+            return invalid(path + ": permille values are at most 1000");
+        return std::nullopt;
+    };
+    if (const auto& c = r.crop)
+        if (auto e = check_area("crop", c->x, c->y, c->width, c->height, c->unit)) return e;
+
+    if (!r.masks.empty()) {
+        if (r.operation == Operation::probe)
+            return invalid("masks: probe encodes nothing, they would be ignored");
+        if (r.masks.size() > kMaxMasks)
+            return invalid(std::format("masks: {} masks, at most {}", r.masks.size(), kMaxMasks));
+        for (std::size_t i = 0; i < r.masks.size(); ++i) {
+            const Mask& m = r.masks[i];
+            if (auto e = check_area(std::format("masks[{}]", i), m.x, m.y, m.width, m.height, m.unit))
+                return e;
+        }
     }
 
     if (r.deadline_ms) {
@@ -141,26 +160,75 @@ struct Refusal {
     return std::nullopt;
 }
 
+namespace detail {
+
+// A rectangle in pixels, not yet clamped. Permille coordinates are rounded to
+// the nearest pixel, edges rather than sizes: adjacent areas share their border.
+[[nodiscard]] inline Rect to_pixels(int x, int y, int w, int h, std::optional<CropUnit> unit, int width,
+                                    int height) {
+    if (unit != CropUnit::permille) return {x, y, w, h};
+    const auto scale = [](int v, int size) {
+        return static_cast<int>((static_cast<std::int64_t>(v) * size + 500) / 1000);
+    };
+    const int px = scale(x, width), py = scale(y, height);
+    return {px, py, scale(x + w, width) - px, scale(y + h, height) - py};
+}
+
+}  // namespace detail
+
 // The crop in pixels, clamped into the image: it always keeps at least one
-// pixel, like codiga's worker. Permille coordinates are rounded to the nearest
-// pixel.
+// pixel, like codiga's worker.
 [[nodiscard]] inline Rect resolve_crop(const Crop& c, int width, int height) {
-    int x = c.x, y = c.y, w = c.width, h = c.height;
-    if (c.unit == CropUnit::permille) {
-        const auto scale = [](int v, int size) {
-            return static_cast<int>((static_cast<std::int64_t>(v) * size + 500) / 1000);
-        };
-        x = scale(c.x, width);
-        y = scale(c.y, height);
-        w = scale(c.x + c.width, width) - x;
-        h = scale(c.y + c.height, height) - y;
-    }
+    const auto [x, y, w, h] = detail::to_pixels(c.x, c.y, c.width, c.height, c.unit, width, height);
     Rect r;
     r.x = std::clamp(x, 0, width - 1);
     r.y = std::clamp(y, 0, height - 1);
     r.width = std::clamp(w, 1, width - r.x);
     r.height = std::clamp(h, 1, height - r.y);
     return r;
+}
+
+// A mask in pixels, cut to the image. Unlike a crop it may vanish: a mask
+// entirely outside the image, or thinner than a pixel once in permille, hides
+// nothing and comes back empty (all zero).
+[[nodiscard]] inline Rect resolve_mask(const Mask& m, int width, int height) {
+    const Rect p = detail::to_pixels(m.x, m.y, m.width, m.height, m.unit, width, height);
+    const std::int64_t x0 = std::max(p.x, 0), y0 = std::max(p.y, 0);
+    const std::int64_t x1 = std::min<std::int64_t>(std::int64_t{p.x} + p.width, width);
+    const std::int64_t y1 = std::min<std::int64_t>(std::int64_t{p.y} + p.height, height);
+    if (x1 <= x0 || y1 <= y0) return {};
+    return {static_cast<int>(x0), static_cast<int>(y0), static_cast<int>(x1 - x0), static_cast<int>(y1 - y0)};
+}
+
+// A rectangle of the oriented image, in the image as stored, before
+// orientation: masks are drawn there, on the single copy in memory, and autorot
+// then carries them with the pixels. `width` and `height` are the stored
+// image's. The EXIF orientations, as libvips autorot applies them: 2 flips
+// horizontally, 3 turns 180°, 4 flips vertically, 5 transposes, 6 turns 90°
+// clockwise, 7 transverses, 8 turns 90° anticlockwise.
+[[nodiscard]] inline Rect to_stored(const Rect& r, int orientation, int width, int height) {
+    // Oriented pixel (a, b) to stored pixel.
+    const auto point = [&](int a, int b) -> std::pair<int, int> {
+        switch (orientation) {
+            case 2: return {width - 1 - a, b};
+            case 3: return {width - 1 - a, height - 1 - b};
+            case 4: return {a, height - 1 - b};
+            case 5: return {b, a};
+            case 6: return {b, height - 1 - a};
+            case 7: return {width - 1 - b, height - 1 - a};
+            case 8: return {width - 1 - b, a};
+            default: return {a, b};
+        }
+    };
+    const auto [x0, y0] = point(r.x, r.y);
+    const auto [x1, y1] = point(r.x + r.width - 1, r.y + r.height - 1);
+    return {std::min(x0, x1), std::min(y0, y1), std::abs(x1 - x0) + 1, std::abs(y1 - y0) + 1};
+}
+
+// The side of a pixelate block: 8 blocks along the zone's longer side. codiga's
+// editor previews it with the same constant (plan § 7).
+[[nodiscard]] inline int pixelate_block(int width, int height) {
+    return std::max(1, (std::max(width, height) + 7) / 8);
 }
 
 // The floor, applied to what is produced: the crop when there is one. Returns

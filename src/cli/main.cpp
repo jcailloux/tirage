@@ -1,6 +1,7 @@
 // tirage: the command line client (plan § 5).
 //
 //   tirage encode --profile <profile.json> [--variants a,b] [--crop x,y,w,h --crop-unit px|permille]
+//                 [--mask x,y,w,h ... --mask-unit px|permille [--mask-style blur|pixelate|fill]]
 //                 [--priority interactive|background] <output-dir> <input-file>
 //   tirage probe  --profile <profile.json> [--crop x,y,w,h --crop-unit px|permille] <input-file>
 //   tirage status [--json]
@@ -19,6 +20,7 @@
 // itself instead.
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -58,6 +60,7 @@ struct Report {
     std::vector<std::string> warnings;
     std::optional<tirage::Source> source;
     std::optional<tirage::Rect> crop;
+    std::vector<tirage::Rect> masks;
     std::vector<WrittenOutput> outputs;
 };
 
@@ -75,6 +78,9 @@ struct Args {
     std::optional<std::string> variants;
     std::optional<std::string> crop;
     std::optional<std::string> crop_unit;
+    std::vector<std::string> masks;
+    std::optional<std::string> mask_unit;
+    std::optional<std::string> mask_style;
     std::optional<std::string> priority;
     std::vector<std::string> positional;
 };
@@ -83,8 +89,10 @@ int usage(const char* why) {
     std::fprintf(stderr,
                  "tirage: %s\n"
                  "usage: tirage encode --profile <profile.json> [--variants a,b] "
-                 "[--crop x,y,w,h --crop-unit px|permille] [--priority interactive|background] "
-                 "<output-dir> <input-file>\n"
+                 "[--crop x,y,w,h --crop-unit px|permille]\n"
+                 "                     [--mask x,y,w,h ... --mask-unit px|permille "
+                 "[--mask-style blur|pixelate|fill]]\n"
+                 "                     [--priority interactive|background] <output-dir> <input-file>\n"
                  "       tirage probe --profile <profile.json> [--crop x,y,w,h --crop-unit px|permille] "
                  "<input-file>\n"
                  "       tirage status [--json]\n"
@@ -114,20 +122,37 @@ std::vector<std::string> split(std::string_view s) {
     }
 }
 
-std::optional<tirage::Crop> parse_crop(const std::string& value, const std::string& unit) {
+// x,y,w,h in integers, for --crop and --mask.
+std::optional<std::array<int, 4>> parse_area(const std::string& value) {
     const auto parts = split(value);
     if (parts.size() != 4) return std::nullopt;
-    int v[4];
+    std::array<int, 4> v{};
     for (int i = 0; i < 4; ++i) {
         const auto& p = parts[i];
         const auto [end, ec] = std::from_chars(p.data(), p.data() + p.size(), v[i]);
         if (ec != std::errc{} || end != p.data() + p.size()) return std::nullopt;
     }
-    tirage::Crop crop{.x = v[0], .y = v[1], .width = v[2], .height = v[3]};
-    if (unit == "px") crop.unit = tirage::CropUnit::px;
-    else if (unit == "permille") crop.unit = tirage::CropUnit::permille;
-    else return std::nullopt;
-    return crop;
+    return v;
+}
+
+std::optional<tirage::CropUnit> parse_unit(const std::string& unit) {
+    if (unit == "px") return tirage::CropUnit::px;
+    if (unit == "permille") return tirage::CropUnit::permille;
+    return std::nullopt;
+}
+
+std::optional<tirage::Crop> parse_crop(const std::string& value, const std::string& unit) {
+    const auto v = parse_area(value);
+    const auto u = parse_unit(unit);
+    if (!v || !u) return std::nullopt;
+    return tirage::Crop{.x = (*v)[0], .y = (*v)[1], .width = (*v)[2], .height = (*v)[3], .unit = u};
+}
+
+std::optional<tirage::MaskStyle> parse_style(const std::string& style) {
+    if (style == "blur") return tirage::MaskStyle::blur;
+    if (style == "pixelate") return tirage::MaskStyle::pixelate;
+    if (style == "fill") return tirage::MaskStyle::fill;
+    return std::nullopt;
 }
 
 std::string_view extension(tirage::OutputFormat f) {
@@ -240,6 +265,9 @@ int main(int argc, char** argv) {
         else if (a == "--variants" && (v = value())) args.variants = v;
         else if (a == "--crop" && (v = value())) args.crop = v;
         else if (a == "--crop-unit" && (v = value())) args.crop_unit = v;
+        else if (a == "--mask" && (v = value())) args.masks.emplace_back(v);
+        else if (a == "--mask-unit" && (v = value())) args.mask_unit = v;
+        else if (a == "--mask-style" && (v = value())) args.mask_style = v;
         else if (a == "--priority" && (v = value())) args.priority = v;
         else if (a.starts_with("--")) return usage("unknown option or missing value");
         else args.positional.emplace_back(a);
@@ -250,7 +278,10 @@ int main(int argc, char** argv) {
     if (args.profile.empty()) return usage("--profile is required");
     if (args.crop.has_value() != args.crop_unit.has_value())
         return usage("--crop and --crop-unit go together");
-    if (!encode && (args.variants || args.priority)) return usage("probe takes no --variants nor --priority");
+    if (args.masks.empty() == args.mask_unit.has_value()) return usage("--mask and --mask-unit go together");
+    if (args.mask_style && args.masks.empty()) return usage("--mask-style needs --mask");
+    if (!encode && (args.variants || args.priority || !args.masks.empty()))
+        return usage("probe takes no --variants, --priority nor --mask");
 
     tirage::Request request{.protocol = tirage::kProtocolVersion,
                             .operation = encode ? tirage::Operation::encode : tirage::Operation::probe};
@@ -262,6 +293,18 @@ int main(int argc, char** argv) {
     if (args.crop) {
         request.crop = parse_crop(*args.crop, *args.crop_unit);
         if (!request.crop) return usage("--crop is x,y,w,h in integers, --crop-unit px or permille");
+    }
+    if (!args.masks.empty()) {
+        const auto unit = parse_unit(*args.mask_unit);
+        if (!unit) return usage("--mask-unit is px or permille");
+        const auto style = parse_style(args.mask_style.value_or("blur"));
+        if (!style) return usage("--mask-style is blur, pixelate or fill");
+        for (const std::string& m : args.masks) {
+            const auto v = parse_area(m);
+            if (!v) return usage("--mask is x,y,w,h in integers");
+            request.masks.push_back(
+                {.x = (*v)[0], .y = (*v)[1], .width = (*v)[2], .height = (*v)[3], .unit = unit, .style = *style});
+        }
     }
 
     const auto profile_json = slurp(args.profile);
@@ -297,7 +340,8 @@ int main(int argc, char** argv) {
                   .code = response.code,
                   .warnings = std::move(response.warnings),
                   .source = response.source,
-                  .crop = response.crop};
+                  .crop = response.crop,
+                  .masks = std::move(response.masks)};
     if (encode && report.error.empty()) {
         const std::filesystem::path dir = args.positional.front();
         std::error_code ec;
