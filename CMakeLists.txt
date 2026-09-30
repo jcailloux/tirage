@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TIRAGE_BUILD_TESTS "Build the doctest unit tests" ${PROJECT_IS_TOP_LEVEL})
+option(TIRAGE_BUILD_TOOLS "Build tirage-worker (needs libvips) and the tirage CLI" ${PROJECT_IS_TOP_LEVEL})
+
+set(TIRAGE_WARNINGS -Wall -Wextra -Wpedantic
+    -Wno-missing-field-initializers)  # designated initializers leave optionals out on purpose
 
 # =============================================================================
 # Dependencies
@@ -22,9 +26,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(glaze)
 
 # =============================================================================
-# tirage::profile: profile schema and validation.
+# tirage::profile: profile schema, protocol and their validation.
 # Pure logic, header-only, no libvips: shared by the daemon, the worker and the
-# client (which is header-only too, hence this library is).
+# client (which is header-only too, hence this library is). direct.h, the
+# direct mode launcher, lives here too: POSIX only, still no libvips.
 # =============================================================================
 add_library(tirage-profile INTERFACE)
 add_library(tirage::profile ALIAS tirage-profile)
@@ -34,6 +39,25 @@ target_include_directories(tirage-profile INTERFACE
 )
 target_compile_features(tirage-profile INTERFACE cxx_std_23)
 target_link_libraries(tirage-profile INTERFACE glaze::glaze)
+
+# =============================================================================
+# Binaries. Only the worker links libvips: the CLI (and later the daemon and
+# the client) never decode an image.
+# =============================================================================
+if(TIRAGE_BUILD_TOOLS)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(VIPS REQUIRED IMPORTED_TARGET vips-cpp>=8.16)
+
+    add_executable(tirage-worker src/worker/main.cpp)
+    target_link_libraries(tirage-worker PRIVATE tirage::profile PkgConfig::VIPS)
+    target_compile_definitions(tirage-worker PRIVATE TIRAGE_VERSION="${PROJECT_VERSION}")
+    target_compile_options(tirage-worker PRIVATE ${TIRAGE_WARNINGS})
+
+    add_executable(tirage src/cli/main.cpp)
+    target_link_libraries(tirage PRIVATE tirage::profile)
+    target_compile_definitions(tirage PRIVATE TIRAGE_VERSION="${PROJECT_VERSION}")
+    target_compile_options(tirage PRIVATE ${TIRAGE_WARNINGS})
+endif()
 
 # =============================================================================
 # Tests
@@ -54,9 +78,24 @@ if(TIRAGE_BUILD_TESTS)
     add_executable(tirage-tests ${TIRAGE_TEST_SOURCES})
     target_include_directories(tirage-tests SYSTEM PRIVATE ${doctest_SOURCE_DIR})
     target_link_libraries(tirage-tests PRIVATE tirage::profile)
-    target_compile_options(tirage-tests PRIVATE -Wall -Wextra -Wpedantic
-        -Wno-missing-field-initializers)  # designated initializers leave optionals out on purpose
+    target_compile_options(tirage-tests PRIVATE ${TIRAGE_WARNINGS})
 
     enable_testing()
     add_test(NAME tirage-tests COMMAND tirage-tests --duration=true)
+
+    # Integration harness: runs the real worker through direct mode on images
+    # it builds with libvips, then decodes what came back.
+    if(TIRAGE_BUILD_TOOLS)
+        file(GLOB TIRAGE_INTEGRATION_SOURCES CONFIGURE_DEPENDS
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/*.cpp)
+        add_executable(tirage-integration ${TIRAGE_INTEGRATION_SOURCES})
+        target_include_directories(tirage-integration SYSTEM PRIVATE ${doctest_SOURCE_DIR})
+        target_link_libraries(tirage-integration PRIVATE tirage::profile PkgConfig::VIPS)
+        target_compile_definitions(tirage-integration PRIVATE
+            TIRAGE_WORKER_PATH="$<TARGET_FILE:tirage-worker>")
+        target_compile_options(tirage-integration PRIVATE ${TIRAGE_WARNINGS})
+        add_dependencies(tirage-integration tirage-worker)
+        add_test(NAME tirage-integration COMMAND tirage-integration --duration=true)
+        set_tests_properties(tirage-integration PROPERTIES LABELS integration)
+    endif()
 endif()
