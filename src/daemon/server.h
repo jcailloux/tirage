@@ -51,9 +51,11 @@
 namespace tirage::daemon {
 
 // Read first, with unknown keys skipped: a request of another protocol version
-// gets a refusal that says so, rather than a failure to read it.
+// gets a refusal that says so, rather than a failure to read it. A status
+// request is answered from the envelope alone.
 struct Envelope {
     int protocol = 0;
+    Operation operation = Operation::encode;
 };
 
 // Environment the daemon hands its budget from, gathered by main().
@@ -150,6 +152,7 @@ private:
         TimePoint received;
         TimePoint started;
         // Running.
+        int threads = 0;
         pid_t pid = -1;
         Fd output;
         Fd pidfd;
@@ -364,6 +367,12 @@ private:
                                        std::format("protocol: unsupported version {}, expected {}",
                                                    envelope.protocol, kProtocolVersion)}));
         }
+        // Not a job, and not journaled: a monitor may ask every minute. Its
+        // own few bytes are not counted in what it reports.
+        if (envelope.operation == Operation::status) {
+            pending_bytes_ -= std::exchange(c.reserved, 0);
+            return finish(id, status(now));
+        }
 
         Request request;
         if (const auto ec = glz::read_beve(request, body)) {
@@ -459,6 +468,7 @@ private:
             log_work(w, "result=failure " + why);
             return end(w.id);
         }
+        w.threads = threads;
         w.kill_at = now + std::chrono::seconds(config_.timeout_s);
         watch(w.output.fd, EPOLLIN, key(Kind::output, w.id));
         watch(w.pidfd.fd, EPOLLIN, key(Kind::pid, w.id));
@@ -603,6 +613,46 @@ private:
         if (*next <= now) return 0;
         const auto wait = std::chrono::ceil<std::chrono::milliseconds>(*next - now).count();
         return static_cast<int>(std::min<std::int64_t>(wait, 60'000));
+    }
+
+    // What `tirage status` shows (plan § 6): the budget, what runs, what
+    // waits, in start order.
+    Status status(TimePoint now) const {
+        Status s{.version = TIRAGE_VERSION,
+                 .threads = threads_,
+                 .queue = config_.queue,
+                 .probe_limit = config_.probe_limit,
+                 .timeout_s = config_.timeout_s,
+                 .pending_bytes = pending_bytes_,
+                 .max_pending_bytes = config_.max_pending_bytes};
+        const auto job = [&](const Work& w) {
+            StatusJob j{.caller = w.caller,
+                        .operation = w.request.operation,
+                        .priority = w.request.priority,
+                        .in_bytes = static_cast<std::int64_t>(w.in_bytes)};
+            const auto millis = [](std::chrono::nanoseconds d) {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+            };
+            if (w.running()) {
+                if (!w.probe()) j.waited_ms = millis(w.started - w.received);
+                j.running_ms = millis(now - w.started);
+            } else {
+                j.waited_ms = millis(now - w.received);
+            }
+            return j;
+        };
+        // The running encode first, then the probes.
+        if (const auto id = scheduler_.running())
+            if (const auto it = works_.find(*id); it != works_.end() && it->second.running())
+                s.running.push_back(job(it->second));
+        for (const auto& [id, w] : works_) {
+            if (!w.running()) continue;
+            s.busy_threads += w.threads;
+            if (w.probe()) s.running.push_back(job(w));
+        }
+        for (const JobId id : scheduler_.order())
+            if (const auto it = works_.find(id); it != works_.end()) s.queued.push_back(job(it->second));
+        return s;
     }
 
     // ------------------------------------------------------------------

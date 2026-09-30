@@ -12,12 +12,17 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 
 #include <glaze/glaze.hpp>
 
 #include "tirage/validate.h"
 
 namespace tirage {
+
+// Where the daemon listens and callers look, unless told otherwise (the
+// daemon's configuration, TIRAGE_SOCKET).
+inline constexpr std::string_view kDefaultSocketPath = "/run/tirage/tirage.sock";
 
 inline constexpr std::size_t kFrameHeaderSize = 4;
 

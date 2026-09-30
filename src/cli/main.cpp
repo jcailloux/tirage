@@ -3,34 +3,41 @@
 //   tirage encode --profile <profile.json> [--variants a,b] [--crop x,y,w,h --crop-unit px|permille]
 //                 [--priority interactive|background] <output-dir> <input-file>
 //   tirage probe  --profile <profile.json> [--crop x,y,w,h --crop-unit px|permille] <input-file>
+//   tirage status [--json]
 //   tirage --version
 //
-// Prints one JSON object on the standard output. A refusal is that object with
-// a non-empty "error" and exit code 0. A failure (worker missing or killed,
-// file unreadable, bad arguments) is a message on the standard error and a
-// non-zero exit code. encode writes <variant>-<width>.<ext> into <output-dir>,
-// and nowhere else.
+// encode and probe print one JSON object on the standard output. A refusal is
+// that object with a non-empty "error" and exit code 0. Busy (the daemon did
+// not run the job, try again later) is a message on the standard error and
+// exit code 75 (EX_TEMPFAIL). A failure (daemon unreachable, worker missing or
+// killed, file unreadable) is a message on the standard error and exit code 1,
+// bad arguments exit code 2. encode writes <variant>-<width>.<ext> into
+// <output-dir>, and nowhere else.
 //
-// Only direct mode for now (TIRAGE_DIRECT=1): the CLI launches tirage-worker
-// itself. It goes through tiraged with libtirage-client, in phase 3.
+// The CLI talks to tiraged through libtirage-client (TIRAGE_SOCKET, else
+// /run/tirage/tirage.sock). With TIRAGE_DIRECT=1 it launches tirage-worker
+// itself instead.
 
+#include <algorithm>
 #include <charconv>
+#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include <glaze/glaze.hpp>
 
-#include "tirage/direct.h"
+#include "tirage/client.h"
 #include "tirage/protocol.h"
 #include "tirage/request.h"
-#include "tirage/validate.h"
 
 // What the CLI prints: the response, with the files written instead of their
 // bytes. Not in the anonymous namespace: glaze reflection needs linkage.
@@ -60,7 +67,7 @@ namespace {
 
 using tirage::cli::Report;
 
-enum Exit { kOk = 0, kFailure = 1, kUsage = 2 };
+enum Exit { kOk = 0, kFailure = 1, kUsage = 2, kBusy = 75 };
 
 struct Args {
     std::string command;
@@ -80,6 +87,7 @@ int usage(const char* why) {
                  "<output-dir> <input-file>\n"
                  "       tirage probe --profile <profile.json> [--crop x,y,w,h --crop-unit px|permille] "
                  "<input-file>\n"
+                 "       tirage status [--json]\n"
                  "       tirage --version\n",
                  why);
     return kUsage;
@@ -142,6 +150,70 @@ int print_refusal(tirage::Refusal r) {
     return print(Report{.error = std::move(r.message), .code = r.code});
 }
 
+std::string_view name(tirage::Priority p) { return p == tirage::Priority::interactive ? "interactive" : "background"; }
+
+std::string_view name(tirage::BusyReason r) {
+    switch (r) {
+        case tirage::BusyReason::queue_full: return "queue_full";
+        case tirage::BusyReason::deadline: return "deadline";
+        case tirage::BusyReason::stopping: return "stopping";
+    }
+    return "?";
+}
+
+std::string size(std::int64_t bytes) {
+    if (bytes < (1 << 20)) return std::format("{:.1f} KiB", static_cast<double>(bytes) / (1 << 10));
+    return std::format("{:.1f} MiB", static_cast<double>(bytes) / (1 << 20));
+}
+
+std::string seconds(std::int64_t ms) { return std::format("{:.1f} s", static_cast<double>(ms) / 1000); }
+
+// The status for a person: the budget, what runs, then each queue by caller.
+void print_status(const tirage::Status& s) {
+    std::printf("tiraged %s: %d threads per encode, %d taken\n", s.version.c_str(), s.threads, s.busy_threads);
+    std::printf("request bytes held: %s of %s\n", size(s.pending_bytes).c_str(), size(s.max_pending_bytes).c_str());
+    std::printf("running: %zu\n", s.running.size());
+    for (const tirage::StatusJob& j : s.running) {
+        const bool probe = j.operation == tirage::Operation::probe;
+        std::string line = probe ? std::string("probe") : std::format("encode {}", name(j.priority));
+        line += std::format("  {}  {} in, running for {}", j.caller, size(j.in_bytes), seconds(j.running_ms.value_or(0)));
+        if (!probe) line += std::format(", queued for {}", seconds(j.waited_ms));
+        std::printf("  %s\n", line.c_str());
+    }
+    for (const auto priority : {tirage::Priority::interactive, tirage::Priority::background}) {
+        // Callers in the order of their first job in the queue.
+        std::vector<std::pair<std::string, int>> callers;
+        int total = 0;
+        std::int64_t longest = 0;
+        for (const tirage::StatusJob& j : s.queued) {
+            if (j.priority != priority) continue;
+            ++total;
+            longest = std::max(longest, j.waited_ms);
+            auto it = std::ranges::find(callers, j.caller, &std::pair<std::string, int>::first);
+            if (it == callers.end()) callers.emplace_back(j.caller, 1);
+            else ++it->second;
+        }
+        const int limit = priority == tirage::Priority::interactive ? s.queue.interactive : s.queue.background;
+        std::printf("queued %s: %d of %d", std::string(name(priority)).c_str(), total, limit);
+        if (total) std::printf(", the longest for %s", seconds(longest).c_str());
+        std::printf("\n");
+        for (const auto& [caller, count] : callers) std::printf("  %s  %d\n", caller.c_str(), count);
+    }
+}
+
+int status(bool json) {
+    auto s = tirage::client::status();
+    if (!s) return fail(s.error());
+    if (!json) {
+        print_status(*s);
+        return kOk;
+    }
+    std::string out;
+    if (glz::write_json(*s, out)) return fail("status not serialisable");
+    std::printf("%s\n", out.c_str());
+    return kOk;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -153,6 +225,11 @@ int main(int argc, char** argv) {
     }
     if (argc < 2) return usage("missing command");
     args.command = argv[1];
+    if (args.command == "status") {
+        if (argc == 2) return status(false);
+        if (argc == 3 && std::string_view(argv[2]) == "--json") return status(true);
+        return usage("status takes --json only");
+    }
     if (args.command != "encode" && args.command != "probe") return usage("unknown command");
 
     for (int i = 2; i < argc; ++i) {
@@ -175,10 +252,6 @@ int main(int argc, char** argv) {
         return usage("--crop and --crop-unit go together");
     if (!encode && (args.variants || args.priority)) return usage("probe takes no --variants nor --priority");
 
-    const char* direct = std::getenv("TIRAGE_DIRECT");
-    if (!direct || std::string_view(direct) != "1")
-        return fail("the CLI does not talk to tiraged yet: set TIRAGE_DIRECT=1 to run the worker directly");
-
     tirage::Request request{.protocol = tirage::kProtocolVersion,
                             .operation = encode ? tirage::Operation::encode : tirage::Operation::probe};
     if (args.priority) {
@@ -193,14 +266,10 @@ int main(int argc, char** argv) {
 
     const auto profile_json = slurp(args.profile);
     if (!profile_json) return fail("cannot read the profile " + args.profile);
-    // Direct mode holds the profile to the daemon's compiled bounds (plan § 3).
-    auto profile = tirage::parse_profile(*profile_json, tirage::kDefaultBounds);
-    if (!profile) {
-        const auto& e = profile.error();
-        return print_refusal({tirage::Code::invalid_profile,
-                              e.path.empty() ? e.message : "profile." + e.path + ": " + e.message});
-    }
-    request.profile = std::move(*profile);
+    // Read only: the daemon checks it against its own bounds, which the CLI
+    // does not know (direct mode, against the compiled ones).
+    if (const auto ec = glz::read_json(request.profile, *profile_json))
+        return print_refusal({tirage::Code::invalid_profile, glz::format_error(ec, *profile_json)});
 
     if (encode) {
         if (args.variants) request.variants = split(*args.variants);
@@ -213,27 +282,28 @@ int main(int argc, char** argv) {
     if (!input) return fail("cannot read the input " + input_path);
     request.input = std::move(*input);
 
-    // Checked here too, so that a bad request never costs a worker launch.
-    if (auto r = tirage::validate_request(request, tirage::kDefaultBounds))
-        return print_refusal(std::move(*r));
+    auto reply = tirage::client::call(request);
+    request = {};
+    if (!reply) return fail(reply.error());
+    if (const auto* busy = std::get_if<tirage::Busy>(&*reply)) {
+        std::fprintf(stderr, "tirage: busy (%s): %s\n", std::string(name(busy->reason)).c_str(),
+                     busy->message.c_str());
+        return kBusy;
+    }
+    if (const auto* failure = std::get_if<tirage::Failure>(&*reply)) return fail(failure->message);
+    tirage::Response& response = std::get<tirage::Response>(*reply);
 
-    const tirage::Job job{.request = std::move(request),
-                          .bounds = tirage::kDefaultBounds,
-                          .threads = tirage::direct::threads_from_env()};
-    auto response = tirage::direct::run(job);
-    if (!response) return fail(response.error());
-
-    Report report{.error = std::move(response->error),
-                  .code = response->code,
-                  .warnings = std::move(response->warnings),
-                  .source = response->source,
-                  .crop = response->crop};
+    Report report{.error = std::move(response.error),
+                  .code = response.code,
+                  .warnings = std::move(response.warnings),
+                  .source = response.source,
+                  .crop = response.crop};
     if (encode && report.error.empty()) {
         const std::filesystem::path dir = args.positional.front();
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         if (ec) return fail("cannot create " + dir.string() + ": " + ec.message());
-        for (const tirage::Output& o : response->outputs) {
+        for (const tirage::Output& o : response.outputs) {
             const auto path = dir / std::format("{}-{}.{}", o.variant, o.width, extension(o.format));
             std::ofstream f(path, std::ios::binary | std::ios::trunc);
             f.write(o.bytes.data(), static_cast<std::streamsize>(o.bytes.size()));

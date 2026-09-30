@@ -76,6 +76,9 @@ struct Refusal {
         return invalid(std::format("protocol: unsupported version {}, expected {}", r.protocol,
                                    kProtocolVersion));
 
+    if (r.operation == Operation::status)
+        return invalid("operation: status asks the daemon about itself, it is not a job");
+
     if (auto e = validate(r.profile, daemon))
         return Refusal{Code::invalid_profile, std::format("profile.{}: {}", e->path, e->message)};
 

@@ -5,8 +5,10 @@
 // around the daemon goes around the machine's CPU budget.
 
 #include <cerrno>
+#include <csignal>
 #include <cstdlib>
 #include <expected>
+#include <stop_token>
 #include <string>
 
 #include <sys/wait.h>
@@ -35,18 +37,24 @@ namespace tirage::direct {
 
 // Runs one job in a fresh worker and returns its response. A refusal is a
 // response with an error. The unexpected branch is a failure: the worker could
-// not be launched, died, or answered something unreadable.
+// not be launched, died, or answered something unreadable. A stop request kills
+// the worker, like a hang-up does through the daemon.
 [[nodiscard]] inline std::expected<Response, std::string> run(const Job& job,
-                                                              const std::string& worker = worker_path()) {
+                                                              const std::string& worker = worker_path(),
+                                                              std::stop_token stop = {}) {
     auto process = spawn_worker(job, worker);
     if (!process) return std::unexpected(process.error());
 
     std::string reply;
-    char buf[65536];
-    for (;;) {
-        const auto n = ::read(process->output.fd, buf, sizeof buf);
-        if (n > 0) reply.append(buf, static_cast<std::size_t>(n));
-        else if (n == 0 || errno != EINTR) break;
+    {
+        // Gone before the worker is reaped: the pid it may kill is still ours.
+        const std::stop_callback kill_on_stop(stop, [pid = process->pid] { ::kill(pid, SIGKILL); });
+        char buf[65536];
+        for (;;) {
+            const auto n = ::read(process->output.fd, buf, sizeof buf);
+            if (n > 0) reply.append(buf, static_cast<std::size_t>(n));
+            else if (n == 0 || errno != EINTR) break;
+        }
     }
 
     int status = 0;

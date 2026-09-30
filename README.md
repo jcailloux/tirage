@@ -21,7 +21,10 @@ The leak non-regression test (500 AVIF encodes through the daemon, plan § 9) is
 Run it in `debian:trixie-slim`, whose libheif leaks:
 `tirage-integration -tc='*memory stays flat*' --no-skip` (`TIRAGE_LEAK_COUNT` changes the count).
 
-`-DTIRAGE_BUILD_TOOLS=OFF` builds only the header-only library and its unit tests, without libvips.
+`-DTIRAGE_BUILD_TOOLS=OFF` builds only the header-only libraries and their unit tests, without libvips.
+
+The hardening checks (plan § 6) run the daemon, its workers and a caller under the sandboxing of
+their systemd units, as transient units of your user manager: `tests/hardening/check.sh .build/gcc`.
 
 ## Daemon
 
@@ -47,24 +50,52 @@ every key is optional and an unknown key is refused:
 
 `SIGHUP` reloads it for the requests that follow. `SIGTERM` answers the queued requests `busy` and
 stops once the running worker is done. One line per request goes to the standard error (the journal).
+`tirage status` shows the budget, what runs and what waits, by priority and by caller (`--json` for
+the whole of it).
 
 Protocol: one request per connection, in frames of a 4-byte little-endian length then BEVE. The daemon
 answers `queued` (with the number of encodes ahead) and `started` for an encode, then one final message:
 a response (success, or refusal with its code), `busy` (retry later: queue full, deadline passed,
 daemon stopping) or a failure. Hanging up cancels the request.
 
-## Direct mode
-
-The CLI does not talk to the daemon yet (phase 3). Meanwhile it launches the worker itself:
+## CLI
 
 ```sh
-export TIRAGE_DIRECT=1 TIRAGE_WORKER=$PWD/.build/gcc/tirage-worker TIRAGE_THREADS=3
+export TIRAGE_SOCKET=/tmp/tirage.sock   # else /run/tirage/tirage.sock
 .build/gcc/tirage probe --profile profile.json photo.jpg
 .build/gcc/tirage encode --profile profile.json --crop 0,0,900,1000 --crop-unit permille out/ photo.jpg
+.build/gcc/tirage status
 ```
 
 `encode` writes `<variant>-<width>.<ext>` into the output directory and prints a JSON report. A
-refusal is that report with a non-empty `error` and exit code 0. A failure exits non-zero.
+refusal is that report with a non-empty `error` and exit code 0. Busy exits 75 (try again later), a
+failure exits 1, bad arguments exit 2.
+
+Direct mode, for development only, launches the worker without a daemon (and without its budget):
+
+```sh
+export TIRAGE_DIRECT=1 TIRAGE_WORKER=$PWD/.build/gcc/tirage-worker TIRAGE_THREADS=3
+```
+
+## C++ client
+
+`libtirage-client` is header-only (`#include "tirage/client.h"`, CMake target `tirage::client`, glaze
+only). A call is synchronous: make it from a thread of your own.
+
+```cpp
+std::stop_source stop;  // request_stop() hangs up, which cancels the job
+auto reply = tirage::client::call(request, {
+    .on_event = [](const tirage::client::Event& e) { /* Queued{position}, then Started{waited_ms} */ },
+    .stop = stop.get_token(),
+});
+if (!reply) { /* transport: daemon unreachable, connection cut, or tirage::client::kCancelled */ }
+else if (auto* r = std::get_if<tirage::Response>(&*reply)) { /* success, or refusal: r->error, r->code */ }
+else if (auto* b = std::get_if<tirage::Busy>(&*reply)) { /* send it again later */ }
+else { /* tirage::Failure: log it */ }
+```
+
+The same call honours `TIRAGE_SOCKET` and `TIRAGE_DIRECT`. `tirage::client::status()` returns what
+`tirage status` shows.
 
 ## License
 

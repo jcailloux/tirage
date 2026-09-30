@@ -22,7 +22,6 @@
 namespace tirage::daemon {
 
 inline constexpr std::string_view kDefaultConfigPath = "/etc/tirage/tirage.json";
-inline constexpr std::string_view kDefaultSocketPath = "/run/tirage/tirage.sock";
 
 struct Config {
     // Threads of each encode. Absent: TIRAGE_THREADS, then the daemon's CPU

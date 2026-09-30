@@ -24,12 +24,6 @@ using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 using JobId = std::uint64_t;
 
-// How many encodes may wait, per priority. The running one is not counted.
-struct QueueLimits {
-    int interactive = 32;
-    int background = 256;
-};
-
 class Scheduler {
 public:
     explicit Scheduler(QueueLimits limits = {}) : limits_(limits) {}
@@ -105,11 +99,17 @@ public:
 
     // Everything queued, in start order. Stopping the daemon answers them all.
     [[nodiscard]] std::vector<JobId> drain() {
+        std::vector<JobId> out = order();
+        interactive_.clear();
+        background_.clear();
+        return out;
+    }
+
+    // Everything queued, in start order, left in place (for status).
+    [[nodiscard]] std::vector<JobId> order() const {
         std::vector<JobId> out;
-        for (auto* queue : {&interactive_, &background_}) {
+        for (const auto* queue : {&interactive_, &background_})
             for (const Entry& e : *queue) out.push_back(e.id);
-            queue->clear();
-        }
         return out;
     }
 

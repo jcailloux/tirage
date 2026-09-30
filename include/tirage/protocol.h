@@ -23,7 +23,8 @@ namespace tirage {
 // Current protocol version. A request with another version is refused.
 inline constexpr int kProtocolVersion = 1;
 
-enum class Operation { encode, probe };
+// status asks the daemon what it is doing: it is not a job (plan § 6).
+enum class Operation { encode, probe, status };
 enum class Priority { interactive, background };
 enum class CropUnit { px, permille };
 
@@ -112,6 +113,7 @@ struct Job {
 // ---------------------------------------------------------------------------
 // What the daemon sends back on its socket (plan § 4): zero or more events,
 // then exactly one final message (Response, Busy or Failure), then it closes.
+// A status request gets a single Status instead.
 
 // Encode only, sent once, as soon as the job is queued. `position` counts every
 // encode that starts before this one at that moment: the one running, and the
@@ -147,7 +149,39 @@ struct Failure {
     std::string message;
 };
 
-using Message = std::variant<Queued, Started, Response, Busy, Failure>;
+// How many encodes may wait, per priority. The running one is not counted.
+struct QueueLimits {
+    int interactive = 32;
+    int background = 256;
+};
+
+// One job, as `status` shows it.
+struct StatusJob {
+    std::string caller;  // the user name behind the connection
+    Operation operation = Operation::encode;
+    Priority priority = Priority::interactive;
+    std::int64_t in_bytes = 0;
+    std::int64_t waited_ms = 0;               // in the queue, until now or until it started
+    std::optional<std::int64_t> running_ms;  // since it started, running jobs only
+};
+
+// The answer to a status request, its only message. Nothing in it is secret
+// from the callers: they share the machine and its budget.
+struct Status {
+    std::string version;       // the daemon's
+    int threads = 0;           // the threads of one encode, the budget
+    int busy_threads = 0;      // taken now: the running encode's, and one per probe
+    QueueLimits queue;
+    int probe_limit = 0;
+    int timeout_s = 0;
+    std::int64_t pending_bytes = 0;      // request bytes the daemon holds
+    std::int64_t max_pending_bytes = 0;
+    std::vector<StatusJob> running;      // the encode, then the probes
+    std::vector<StatusJob> queued;       // in start order
+};
+
+// New alternatives go at the end: BEVE numbers them in this order.
+using Message = std::variant<Queued, Started, Response, Busy, Failure, Status>;
 
 }  // namespace tirage
 
@@ -160,7 +194,7 @@ struct glz::meta<tirage::BusyReason> {
 template <>
 struct glz::meta<tirage::Operation> {
     using enum tirage::Operation;
-    static constexpr auto value = glz::enumerate(encode, probe);
+    static constexpr auto value = glz::enumerate(encode, probe, status);
 };
 
 template <>

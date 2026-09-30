@@ -233,3 +233,41 @@ TEST_CASE("deadline_ms: positive, encode only") {
     r.variants.clear();
     CHECK(validate_request(r)->message.starts_with("deadline_ms"));
 }
+
+TEST_CASE("scheduler: status sees the queue in start order, untouched") {
+    Scheduler s;
+    REQUIRE(s.enqueue(1, Priority::background, std::nullopt));
+    REQUIRE(s.start() == 1u);
+    REQUIRE(s.enqueue(2, Priority::background, std::nullopt));
+    REQUIRE(s.enqueue(3, Priority::interactive, std::nullopt));
+    CHECK(s.order() == std::vector<JobId>{3, 2});
+    CHECK(s.order() == std::vector<JobId>{3, 2});
+    CHECK(s.start() == std::nullopt);  // 1 still runs
+}
+
+TEST_CASE("status: a request of its own, a message of its own") {
+    Request r;
+    r.protocol = kProtocolVersion;
+    r.operation = Operation::status;
+    // Never a job: the daemon answers it from the envelope, a worker refuses it.
+    CHECK(validate_request(r)->message.starts_with("operation"));
+
+    Status s{.version = "1.2.3", .threads = 3, .busy_threads = 4, .pending_bytes = 10};
+    s.running.push_back({.caller = "codiga", .operation = Operation::probe, .in_bytes = 5, .running_ms = 12});
+    s.queued.push_back({.caller = "celeno", .priority = Priority::background, .waited_ms = 7});
+    std::string beve;
+    REQUIRE_FALSE(glz::write_beve(Message{s}, beve));
+    Message back;
+    REQUIRE_FALSE(glz::read_beve(back, beve));
+    REQUIRE(std::holds_alternative<Status>(back));
+    const Status& t = std::get<Status>(back);
+    CHECK(t.version == "1.2.3");
+    CHECK(t.busy_threads == 4);
+    CHECK(t.queue.background == 256);
+    REQUIRE(t.running.size() == 1);
+    CHECK(t.running[0].operation == Operation::probe);
+    CHECK(t.running[0].running_ms == 12);
+    REQUIRE(t.queued.size() == 1);
+    CHECK(t.queued[0].caller == "celeno");
+    CHECK_FALSE(t.queued[0].running_ms.has_value());
+}
