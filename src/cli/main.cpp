@@ -11,8 +11,8 @@
 // non-zero exit code. encode writes <variant>-<width>.<ext> into <output-dir>,
 // and nowhere else.
 //
-// Phase 1 only has direct mode (TIRAGE_DIRECT=1): the CLI launches
-// tirage-worker itself. The daemon comes in phase 2.
+// Only direct mode for now (TIRAGE_DIRECT=1): the CLI launches tirage-worker
+// itself. It goes through tiraged with libtirage-client, in phase 3.
 
 #include <charconv>
 #include <cstdio>
@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
 
     const char* direct = std::getenv("TIRAGE_DIRECT");
     if (!direct || std::string_view(direct) != "1")
-        return fail("tiraged is not available yet: set TIRAGE_DIRECT=1 to run the worker directly");
+        return fail("the CLI does not talk to tiraged yet: set TIRAGE_DIRECT=1 to run the worker directly");
 
     tirage::Request request{.protocol = tirage::kProtocolVersion,
                             .operation = encode ? tirage::Operation::encode : tirage::Operation::probe};

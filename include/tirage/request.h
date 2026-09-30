@@ -101,6 +101,12 @@ struct Refusal {
             return invalid("crop: permille values are at most 1000");
     }
 
+    if (r.deadline_ms) {
+        if (r.operation == Operation::probe)
+            return invalid("deadline_ms: probe is never queued, it would be ignored");
+        if (*r.deadline_ms <= 0) return invalid("deadline_ms: must be positive");
+    }
+
     if (r.input.empty()) return invalid("input: empty");
     return std::nullopt;
 }

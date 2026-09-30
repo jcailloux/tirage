@@ -7,8 +7,10 @@
 // Checking a request is request.h. On the wire it is BEVE (glaze), which carries
 // the input and output bytes as they are.
 
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -42,6 +44,11 @@ struct Request {
     Profile profile;
     std::vector<std::string> variants;  // encode: the variants to produce, in this order
     std::optional<Crop> crop;
+    // Encode only: milliseconds from the moment the daemon has read the request.
+    // A job still queued past it is dropped (Busy, deadline). Relative, so that
+    // the caller's and the daemon's clocks never have to agree. Once started, a
+    // job runs to its end or to the daemon's timeout.
+    std::optional<std::int64_t> deadline_ms;
     std::string input;  // the original's bytes
 };
 
@@ -102,7 +109,53 @@ struct Job {
     int threads = 1;
 };
 
+// ---------------------------------------------------------------------------
+// What the daemon sends back on its socket (plan § 4): zero or more events,
+// then exactly one final message (Response, Busy or Failure), then it closes.
+
+// Encode only, sent once, as soon as the job is queued. `position` counts every
+// encode that starts before this one at that moment: the one running, and the
+// queued ones ahead of it, interactive ones included for a background job. It is
+// not updated: interactive jobs arriving later still pass a background one.
+// 0 means the job starts right away.
+struct Queued {
+    int position = 0;
+};
+
+// Encode only, sent once, when the worker is launched.
+struct Started {
+    std::int64_t waited_ms = 0;  // time spent in the queue
+};
+
+enum class BusyReason {
+    queue_full,  // the queue of this priority, the probe limit or the daemon's memory is full
+    deadline,    // still queued when deadline_ms ran out
+    stopping,    // the daemon is shutting down
+};
+
+// Neither a refusal (nothing is wrong with the request) nor a failure (nothing
+// broke): the daemon did not run the job, and the same request can be sent
+// again later, unchanged.
+struct Busy {
+    BusyReason reason = BusyReason::queue_full;
+    std::string message;
+};
+
+// Something broke: worker killed or timed out, unreadable frame, worker not
+// launched. The caller logs it, it is never the image's fault.
+struct Failure {
+    std::string message;
+};
+
+using Message = std::variant<Queued, Started, Response, Busy, Failure>;
+
 }  // namespace tirage
+
+template <>
+struct glz::meta<tirage::BusyReason> {
+    using enum tirage::BusyReason;
+    static constexpr auto value = glz::enumerate(queue_full, deadline, stopping);
+};
 
 template <>
 struct glz::meta<tirage::Operation> {
