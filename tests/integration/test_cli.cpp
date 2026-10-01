@@ -128,7 +128,7 @@ TEST_CASE("cli: masks, and their options checked") {
 
     const Run run = cli(d.dir(), d.socket(),
                         {"encode", "--profile", "profile.json", "--mask", "0,0,10,10", "--mask", "500,0,100,1000",
-                         "--mask-unit", "permille", "--mask-style", "pixelate", "out", "in.png"});
+                         "--mask-unit", "permille", "--mask-style", "pixelate", "--mask-edge", "soft", "out", "in.png"});
     REQUIRE_MESSAGE(run.code == 0, run.err);
     const Printed p = printed(run);
     CHECK(p.error.empty());
@@ -145,6 +145,8 @@ TEST_CASE("cli: masks, and their options checked") {
     CHECK(usage({"--mask-unit", "px"}) == 2);                                     // no mask
     CHECK(usage({"--mask", "0,0,10", "--mask-unit", "px"}) == 2);                 // three numbers
     CHECK(usage({"--mask", "0,0,10,10", "--mask-unit", "px", "--mask-style", "erase"}) == 2);
+    CHECK(usage({"--mask", "0,0,10,10", "--mask-unit", "px", "--mask-edge", "round"}) == 2);
+    CHECK(usage({"--mask-edge", "soft"}) == 2);                                   // no mask
     CHECK(cli(d.dir(), d.socket(), {"probe", "--profile", "profile.json", "--mask", "0,0,1,1", "--mask-unit", "px",
                                     "in.png"})
               .code == 2);

@@ -182,18 +182,44 @@ inline VImage hidden(const VImage& zone, MaskStyle style) {
     return out.cast(zone.format());
 }
 
+// A soft edge: `patch` (the hidden zone) laid over `zone` (the image as it
+// was) with soft_coverage as opacity. `whole` is the mask's whole rectangle,
+// `z` the part of it inside the image, both as stored. The rounded rectangle
+// is the same under every EXIF orientation (flips and quarter turns only swap
+// its sides), so its opacity is computed as stored, without turning anything.
+inline VImage soften(const VImage& patch, const VImage& zone, const Rect& whole, const Rect& z) {
+    std::vector<unsigned char> alpha(static_cast<std::size_t>(z.width) * z.height);
+    for (int y = 0; y < z.height; ++y)
+        for (int x = 0; x < z.width; ++x)
+            alpha[static_cast<std::size_t>(y) * z.width + x] = static_cast<unsigned char>(
+                std::lround(255 * soft_coverage(z.x - whole.x + x, z.y - whole.y + y, whole.width, whole.height)));
+    const VImage a =
+        VImage::new_from_memory_copy(alpha.data(), alpha.size(), z.width, z.height, 1, VIPS_FORMAT_UCHAR);
+    return ((patch.cast(VIPS_FORMAT_FLOAT) * a + zone.cast(VIPS_FORMAT_FLOAT) * (255 - a)) / 255)
+        .rint()
+        .cast(zone.format());
+}
+
 // Draws the masks into `img`, the in-memory copy, still as stored. `zones` are
-// the masks resolved on the oriented image, in their order: each is moved to
-// the stored image (to_stored) and replaced in place. Only the zone's pixels
-// are read, and nothing is copied but the zone.
-inline void draw_masks(VImage& img, const std::vector<Mask>& masks, const std::vector<Rect>& zones) {
+// the masks resolved on the oriented image (`width` x `height`), in their
+// order: each is moved to the stored image (to_stored) and replaced in place.
+// Only the zone's pixels are read, and nothing is copied but the zone.
+inline void draw_masks(VImage& img, const std::vector<Mask>& masks, const std::vector<Rect>& zones, int width,
+                       int height) {
     const int orientation = vips_image_get_orientation(img.get_image());
     for (std::size_t i = 0; i < masks.size(); ++i) {
         if (zones[i].width == 0) continue;
+        const Mask& m = masks[i];
         const Rect z = to_stored(zones[i], orientation, img.width(), img.height());
         // In memory before drawing: the patch is read from the image it goes into.
-        const VImage patch = hidden(img.extract_area(z.x, z.y, z.width, z.height), masks[i].style).copy_memory();
-        img.draw_image(patch, z.x, z.y);
+        const VImage zone = img.extract_area(z.x, z.y, z.width, z.height).copy_memory();
+        VImage patch = hidden(zone, m.style);
+        if (m.edge == MaskEdge::soft) {
+            const Rect oriented = tirage::detail::to_pixels(m.x, m.y, m.width, m.height, m.unit, width, height);
+            const Rect whole = to_stored(oriented, orientation, img.width(), img.height());
+            patch = soften(patch, zone, whole, z);
+        }
+        img.draw_image(patch.copy_memory(), z.x, z.y);
     }
 }
 
@@ -309,7 +335,7 @@ inline std::string encode(const VImage& img, OutputFormat format, int quality,
                 if (out.masks.back().width == 0)
                     out.warnings.push_back(std::format("masks[{}]: no pixel of the image, nothing hidden", i));
             }
-            detail::draw_masks(img, req.masks, out.masks);
+            detail::draw_masks(img, req.masks, out.masks, width, height);
         }
 
         // Orientation and crop, on the copy in memory. autorot also removes the

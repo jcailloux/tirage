@@ -1,7 +1,8 @@
 // tirage: the command line client (plan § 5).
 //
 //   tirage encode --profile <profile.json> [--variants a,b] [--crop x,y,w,h --crop-unit px|permille]
-//                 [--mask x,y,w,h ... --mask-unit px|permille [--mask-style blur|pixelate|fill]]
+//                 [--mask x,y,w,h ... --mask-unit px|permille [--mask-style blur|pixelate|fill]
+//                  [--mask-edge sharp|soft]]
 //                 [--priority interactive|background] <output-dir> <input-file>
 //   tirage probe  --profile <profile.json> [--crop x,y,w,h --crop-unit px|permille] <input-file>
 //   tirage status [--json]
@@ -81,6 +82,7 @@ struct Args {
     std::vector<std::string> masks;
     std::optional<std::string> mask_unit;
     std::optional<std::string> mask_style;
+    std::optional<std::string> mask_edge;
     std::optional<std::string> priority;
     std::vector<std::string> positional;
 };
@@ -91,7 +93,8 @@ int usage(const char* why) {
                  "usage: tirage encode --profile <profile.json> [--variants a,b] "
                  "[--crop x,y,w,h --crop-unit px|permille]\n"
                  "                     [--mask x,y,w,h ... --mask-unit px|permille "
-                 "[--mask-style blur|pixelate|fill]]\n"
+                 "[--mask-style blur|pixelate|fill]\n"
+                 "                      [--mask-edge sharp|soft]]\n"
                  "                     [--priority interactive|background] <output-dir> <input-file>\n"
                  "       tirage probe --profile <profile.json> [--crop x,y,w,h --crop-unit px|permille] "
                  "<input-file>\n"
@@ -146,6 +149,12 @@ std::optional<tirage::Crop> parse_crop(const std::string& value, const std::stri
     const auto u = parse_unit(unit);
     if (!v || !u) return std::nullopt;
     return tirage::Crop{.x = (*v)[0], .y = (*v)[1], .width = (*v)[2], .height = (*v)[3], .unit = u};
+}
+
+std::optional<tirage::MaskEdge> parse_edge(const std::string& edge) {
+    if (edge == "sharp") return tirage::MaskEdge::sharp;
+    if (edge == "soft") return tirage::MaskEdge::soft;
+    return std::nullopt;
 }
 
 std::optional<tirage::MaskStyle> parse_style(const std::string& style) {
@@ -268,6 +277,7 @@ int main(int argc, char** argv) {
         else if (a == "--mask" && (v = value())) args.masks.emplace_back(v);
         else if (a == "--mask-unit" && (v = value())) args.mask_unit = v;
         else if (a == "--mask-style" && (v = value())) args.mask_style = v;
+        else if (a == "--mask-edge" && (v = value())) args.mask_edge = v;
         else if (a == "--priority" && (v = value())) args.priority = v;
         else if (a.starts_with("--")) return usage("unknown option or missing value");
         else args.positional.emplace_back(a);
@@ -280,6 +290,7 @@ int main(int argc, char** argv) {
         return usage("--crop and --crop-unit go together");
     if (args.masks.empty() == args.mask_unit.has_value()) return usage("--mask and --mask-unit go together");
     if (args.mask_style && args.masks.empty()) return usage("--mask-style needs --mask");
+    if (args.mask_edge && args.masks.empty()) return usage("--mask-edge needs --mask");
     if (!encode && (args.variants || args.priority || !args.masks.empty()))
         return usage("probe takes no --variants, --priority nor --mask");
 
@@ -299,11 +310,19 @@ int main(int argc, char** argv) {
         if (!unit) return usage("--mask-unit is px or permille");
         const auto style = parse_style(args.mask_style.value_or("blur"));
         if (!style) return usage("--mask-style is blur, pixelate or fill");
+        const auto edge = parse_edge(args.mask_edge.value_or("sharp"));
+        if (!edge) return usage("--mask-edge is sharp or soft");
         for (const std::string& m : args.masks) {
             const auto v = parse_area(m);
             if (!v) return usage("--mask is x,y,w,h in integers");
             request.masks.push_back(
-                {.x = (*v)[0], .y = (*v)[1], .width = (*v)[2], .height = (*v)[3], .unit = unit, .style = *style});
+                {.x = (*v)[0],
+                 .y = (*v)[1],
+                 .width = (*v)[2],
+                 .height = (*v)[3],
+                 .unit = unit,
+                 .style = *style,
+                 .edge = *edge});
         }
     }
 

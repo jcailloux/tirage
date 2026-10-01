@@ -143,8 +143,12 @@ TEST_CASE("mask checks: the crop's rules, a bound, encode only") {
     r.masks[1].height = 1001;
     CHECK(refusal(r).message == "masks[1]: permille values are at most 1000");
     r.masks[1].height = 10;
+    // A mask may start before the image (unlike the crop), within the same bounds.
     r.masks[0].y = -1;
-    CHECK(refusal(r).message == "masks[0]: x and y must not be negative");
+    CHECK_FALSE(validate_request(r).has_value());
+    r.masks[1].x = -1001;
+    CHECK(refusal(r).message == "masks[1]: permille values are at most 1000");
+    r.masks[1].x = 0;
     r.masks[0].y = 0;
 
     r.masks.resize(kMaxMasks, r.masks[0]);
@@ -167,6 +171,40 @@ TEST_CASE("masks: the style is blur unless named, and travels by name") {
     CHECK(glz::read_json(m, R"({"x":1,"y":2,"width":3,"height":4,"unit":"px","style":"erase"})"));
     CHECK(glz::write_json(Mask{.style = MaskStyle::pixelate}).value_or("").find(R"("style":"pixelate")") !=
           std::string::npos);
+}
+
+TEST_CASE("masks: the edge is sharp unless named, and travels by name") {
+    Mask m;
+    REQUIRE_FALSE(glz::read_json(m, R"({"x":1,"y":2,"width":3,"height":4,"unit":"px"})"));
+    CHECK(m.edge == MaskEdge::sharp);
+    REQUIRE_FALSE(glz::read_json(m, R"({"x":1,"y":2,"width":3,"height":4,"unit":"px","edge":"soft"})"));
+    CHECK(m.edge == MaskEdge::soft);
+    CHECK(glz::read_json(m, R"({"x":1,"y":2,"width":3,"height":4,"unit":"px","edge":"round"})"));
+    CHECK(glz::write_json(Mask{.edge = MaskEdge::soft}).value_or("").find(R"("edge":"soft")") != std::string::npos);
+}
+
+TEST_CASE("soft_coverage: a rounded rectangle, faded towards its border") {
+    // 200 x 40: radius 10, fade 4.
+    CHECK(soft_coverage(100, 20, 200, 40) == 1.0);       // the centre
+    CHECK(soft_coverage(100, 4, 200, 40) == 1.0);        // past the fade, along a long side
+    CHECK(soft_coverage(100, 0, 200, 40) < 0.05);        // on the border
+    CHECK(soft_coverage(100, 1, 200, 40) > soft_coverage(100, 0, 200, 40));
+    CHECK(soft_coverage(0, 0, 200, 40) == 0.0);          // the corner is cut off
+    CHECK(soft_coverage(2, 2, 200, 40) == 0.0);
+    CHECK(soft_coverage(10, 10, 200, 40) == 1.0);        // the corner's centre, inside
+    CHECK(soft_coverage(4, 20, 200, 40) == 1.0);         // past the fade, on a short side
+    // Every pixel is between 0 and 1, and the shape is the same under every
+    // flip and quarter turn, which lets the worker draw it as stored.
+    for (int y = 0; y < 40; ++y)
+        for (int x = 0; x < 200; ++x) {
+            const double c = soft_coverage(x, y, 200, 40);
+            CHECK((c >= 0 && c <= 1));
+            CHECK(c == soft_coverage(199 - x, y, 200, 40));
+            CHECK(c == soft_coverage(x, 39 - y, 200, 40));
+            CHECK(c == soft_coverage(y, x, 40, 200));
+        }
+    // A one pixel zone still fades over a pixel, and never divides by zero.
+    CHECK(soft_coverage(0, 0, 1, 1) >= 0.0);
 }
 
 TEST_CASE("an empty input is refused") {
@@ -248,6 +286,11 @@ TEST_CASE("resolve_mask cuts to the image, and may vanish") {
     // Permille like the crop, edges rounded.
     const Rect half = resolve_mask(mask(250, 500, 500, 500, CropUnit::permille), 2000, 1000);
     CHECK((half.x == 500 && half.y == 500 && half.width == 1000 && half.height == 500));
+
+    // A mask starting before the image keeps its part inside.
+    const Rect before = resolve_mask(mask(-20, -10, 50, 40), 100, 100);
+    CHECK((before.x == 0 && before.y == 0 && before.width == 30 && before.height == 30));
+    CHECK(resolve_mask(mask(-50, 0, 50, 10), 100, 100).width == 0);
 
     // Huge values do not overflow.
     const Rect huge = resolve_mask(mask(50, 50, 2'000'000'000, 2'000'000'000), 100, 100);

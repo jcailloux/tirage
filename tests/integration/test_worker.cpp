@@ -481,6 +481,73 @@ TEST_CASE("masks: overlapping zones, each style, hide their whole union") {
     }
 }
 
+TEST_CASE("masks: a soft edge keeps the corners and fades, whatever the EXIF orientation") {
+    // Two ramps, so that a misplaced fade shows.
+    const VImage xy = VImage::xyz(160, 100);
+    const VImage stored = (xy[0] * 1.5).bandjoin(xy[1] * 2.5).bandjoin(xy[0] * 0 + 128)
+                              .cast(VIPS_FORMAT_UCHAR)
+                              .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_sRGB));
+    const int zx = 10, zy = 20, zw = 80, zh = 40;  // fits 160x100 and 100x160: radius 10, fade 4
+
+    for (int o = 1; o <= 8; ++o) {
+        CAPTURE(o);
+        VImage tagged = stored.copy();
+        tagged.set("orientation", o);
+        const std::string jpeg =
+            save(tagged, ".jpg", VImage::option()->set("Q", 100)->set("subsample_mode", VIPS_FOREIGN_SUBSAMPLE_OFF));
+        const VImage oriented = decode(jpeg).autorot();
+
+        Mask soft = mask(zx, zy, zw, zh, MaskStyle::fill);
+        soft.edge = MaskEdge::soft;
+        const Response r = run(exact_jpeg(oriented.width()), jpeg, Operation::encode, std::nullopt, {soft});
+        REQUIRE_MESSAGE(r.error.empty(), r.error);
+        const VImage out = decode(r.outputs.at(0).bytes);
+
+        const std::vector<double> m = mean(oriented, zx, zy, zw, zh);
+        using P = std::pair<int, int>;
+        // Inside the fade, filled: the centre, and the middle of each side once past the fade.
+        for (const auto& [x, y] : {P{zx + 40, zy + 20}, P{zx + 40, zy + 5}, P{zx + 5, zy + 20}, P{zx + 70, zy + 30}})
+            CHECK_MESSAGE(near(out, x, y, m, 4), x, ",", y, ": ", pixel_text(out, x, y));
+        // The rounded corners, and the border itself, are the image as it was.
+        for (const auto& [x, y] : {P{zx, zy}, P{zx + zw - 1, zy}, P{zx, zy + zh - 1}, P{zx + zw - 1, zy + zh - 1},
+                                   P{zx + 1, zy + 1}, P{zx + 40, zy}})
+            CHECK_MESSAGE(near(out, x, y, oriented.getpoint(x, y), 6), x, ",", y, ": ", pixel_text(out, x, y));
+    }
+}
+
+TEST_CASE("masks: a soft zone starting before the image keeps its fade outside it") {
+    // The rounded corner and the fade fall before the image: at its border, the
+    // zone is already fully hidden.
+    const VImage xy = VImage::xyz(200, 100);
+    const VImage checker = ((((xy[0] + xy[1]) % 2) * 255).cast(VIPS_FORMAT_UCHAR))
+                               .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_B_W));
+    Mask soft = mask(-20, -20, 120, 80, MaskStyle::fill);  // radius 20, fade 8
+    soft.edge = MaskEdge::soft;
+    const Response r = run(exact_jpeg(200), save(checker, ".png"), Operation::encode, std::nullopt, {soft});
+    REQUIRE_MESSAGE(r.error.empty(), r.error);
+    REQUIRE(r.masks.size() == 1);
+    CHECK((r.masks[0].x == 0 && r.masks[0].y == 0 && r.masks[0].width == 100 && r.masks[0].height == 60));
+    const VImage out = decode(r.outputs.at(0).bytes);
+    CHECK(out.extract_area(0, 0, 80, 40).deviate() < 10);
+    CHECK(out.extract_area(110, 0, 90, 100).deviate() > 100);
+}
+
+TEST_CASE("masks: a soft blur leaves no detail inside its fade") {
+    const VImage xy = VImage::xyz(240, 100);
+    const VImage checker = ((((xy[0] + xy[1]) % 2) * 255).cast(VIPS_FORMAT_UCHAR))
+                               .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_B_W));
+    Mask soft = mask(20, 10, 200, 60, MaskStyle::blur);
+    soft.edge = MaskEdge::soft;
+    const Response r = run(exact_jpeg(240), save(checker, ".png"), Operation::encode, std::nullopt, {soft});
+    REQUIRE_MESSAGE(r.error.empty(), r.error);
+    const VImage out = decode(r.outputs.at(0).bytes);
+    // Radius 15, fade 6: inside the rounded rectangle shrunk by the fade, no detail.
+    CHECK(out.extract_area(20 + 15, 10 + 6, 200 - 30, 60 - 12).deviate() < 10);
+    CHECK(out.extract_area(20 + 6, 10 + 15, 200 - 12, 60 - 30).deviate() < 10);
+    // Outside the zone, the checkerboard itself.
+    CHECK(out.extract_area(0, 75, 240, 25).deviate() > 100);
+}
+
 TEST_CASE("masks on RGBA: transparent pixels lend no colour") {
     // Red on the right half, transparent black on the left: filled as a whole,
     // premultiplied, the mean stays red with half the opacity.

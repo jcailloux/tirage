@@ -8,6 +8,7 @@
 // the daemon).
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -102,18 +103,23 @@ struct Refusal {
         return invalid("variants: probe encodes nothing, they would be ignored");
     }
 
-    // The crop and every mask are rectangles with the same rules.
+    // The crop and every mask are rectangles with the same rules, but for one:
+    // a mask may start before the image as it may end past it (only its part
+    // inside the image is drawn), so that a soft edge keeps its fade around a
+    // zone that touches the image's left or top border.
     const auto check_area = [&](const std::string& path, int x, int y, int width, int height,
-                                const std::optional<CropUnit>& unit) -> std::optional<Refusal> {
+                                const std::optional<CropUnit>& unit,
+                                bool may_start_outside) -> std::optional<Refusal> {
         if (!unit) return invalid(path + ".unit: required (\"px\" or \"permille\")");
-        if (x < 0 || y < 0) return invalid(path + ": x and y must not be negative");
+        if (!may_start_outside && (x < 0 || y < 0)) return invalid(path + ": x and y must not be negative");
         if (width <= 0 || height <= 0) return invalid(path + ": width and height must be positive");
-        if (*unit == CropUnit::permille && (x > 1000 || y > 1000 || width > 1000 || height > 1000))
+        if (*unit == CropUnit::permille &&
+            (std::abs(x) > 1000 || std::abs(y) > 1000 || width > 1000 || height > 1000))
             return invalid(path + ": permille values are at most 1000");
         return std::nullopt;
     };
     if (const auto& c = r.crop)
-        if (auto e = check_area("crop", c->x, c->y, c->width, c->height, c->unit)) return e;
+        if (auto e = check_area("crop", c->x, c->y, c->width, c->height, c->unit, false)) return e;
 
     if (!r.masks.empty()) {
         if (r.operation == Operation::probe)
@@ -122,7 +128,7 @@ struct Refusal {
             return invalid(std::format("masks: {} masks, at most {}", r.masks.size(), kMaxMasks));
         for (std::size_t i = 0; i < r.masks.size(); ++i) {
             const Mask& m = r.masks[i];
-            if (auto e = check_area(std::format("masks[{}]", i), m.x, m.y, m.width, m.height, m.unit))
+            if (auto e = check_area(std::format("masks[{}]", i), m.x, m.y, m.width, m.height, m.unit, true))
                 return e;
         }
     }
@@ -202,6 +208,30 @@ namespace detail {
     const std::int64_t y1 = std::min<std::int64_t>(std::int64_t{p.y} + p.height, height);
     if (x1 <= x0 || y1 <= y0) return {};
     return {static_cast<int>(x0), static_cast<int>(y0), static_cast<int>(x1 - x0), static_cast<int>(y1 - y0)};
+}
+
+// The soft edge of a mask (MaskEdge::soft), on its whole rectangle in pixels,
+// before any cut to the image: a rounded rectangle, faded out towards its
+// border. Constants of the contract, like the styles': codiga's editor
+// previews them.
+inline constexpr int kSoftRadiusDivisor = 4;  // corner radius: shorter side / 4
+inline constexpr int kSoftFadeDivisor = 10;   // fade: shorter side / 10, 1 pixel at least
+
+// Opacity of a soft mask, from 0 (the image as it was) to 1 (fully hidden), at
+// pixel (x, y) of its width x height rectangle, measured at the pixel's centre.
+// The fade follows a smoothstep: no visible step where it starts or ends.
+[[nodiscard]] inline double soft_coverage(int x, int y, int width, int height) {
+    const double shorter = std::min(width, height);
+    const double radius = shorter / kSoftRadiusDivisor;
+    const double fade = std::max(1.0, shorter / kSoftFadeDivisor);
+    // Signed distance to the rounded rectangle, negative inside.
+    const double dx = std::abs(x + 0.5 - width / 2.0) - (width / 2.0 - radius);
+    const double dy = std::abs(y + 0.5 - height / 2.0) - (height / 2.0 - radius);
+    const double outside = std::hypot(std::max(dx, 0.0), std::max(dy, 0.0));
+    const double inside = std::min(std::max(dx, dy), 0.0);
+    const double depth = radius - (outside + inside);  // how far inside the border
+    const double t = std::clamp(depth / fade, 0.0, 1.0);
+    return t * t * (3 - 2 * t);
 }
 
 // A rectangle of the oriented image, in the image as stored, before

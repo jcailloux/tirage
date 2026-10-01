@@ -47,6 +47,14 @@ struct Crop {
 // - fill: one colour, the zone's mean.
 enum class MaskStyle { blur, pixelate, fill };
 
+// How a mask's zone meets the image around it:
+// - sharp: the whole rectangle, square corners;
+// - soft: the rectangle with rounded corners (a radius of a quarter of its
+//   shorter side), faded out towards its border over a tenth of its shorter
+//   side. Only the inside of the fade is fully hidden: a caller that must hide
+//   a whole rectangle draws the mask around it with a margin.
+enum class MaskEdge { sharp, soft };
+
 // A zone to hide (a user name, an avatar), on the oriented image like the
 // crop, and before it: a zone reaching outside the crop is only partly seen.
 // Its unit is required for the same reason as the crop's.
@@ -57,6 +65,7 @@ struct Mask {
     int height = 0;
     std::optional<CropUnit> unit;  // required, checked by validate_request
     MaskStyle style = MaskStyle::blur;
+    MaskEdge edge = MaskEdge::sharp;
 };
 
 // Bound on the number of masks of one request.
@@ -239,6 +248,12 @@ template <>
 struct glz::meta<tirage::MaskStyle> {
     using enum tirage::MaskStyle;
     static constexpr auto value = glz::enumerate(blur, pixelate, fill);
+};
+
+template <>
+struct glz::meta<tirage::MaskEdge> {
+    using enum tirage::MaskEdge;
+    static constexpr auto value = glz::enumerate(sharp, soft);
 };
 
 // tirage::Code has no meta on purpose: glaze writes it as its number.
