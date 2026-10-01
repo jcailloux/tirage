@@ -137,6 +137,23 @@ TEST_CASE("cli: masks, and their options checked") {
     CHECK((p.masks[1].x == 32 && p.masks[1].width == 6 && p.masks[1].height == 48));  // of 64x48
     CHECK(fs::exists(d.dir() / "out/small-32.webp"));
 
+    // A fifth number tilts the mask, in degrees: it comes back as the box around it.
+    const Run tilted = cli(d.dir(), d.socket(),
+                           {"encode", "--profile", "profile.json", "--mask", "12,19,40,10,90", "--mask", "0,0,10,10",
+                            "--mask-unit", "px", "tilted", "in.png"});
+    REQUIRE_MESSAGE(tilted.code == 0, tilted.err);
+    const Printed t = printed(tilted);
+    CHECK(t.error.empty());
+    REQUIRE(t.masks.size() == 2);
+    CHECK((t.masks[0].x == 27 && t.masks[0].y == 4 && t.masks[0].width == 10 && t.masks[0].height == 40));
+    CHECK((t.masks[1].x == 0 && t.masks[1].width == 10));
+    // Past half a turn, the daemon refuses it: a refusal, exit code 0.
+    const Run steep = cli(d.dir(), d.socket(),
+                          {"encode", "--profile", "profile.json", "--mask", "0,0,10,10,181", "--mask-unit", "px", "steep",
+                           "in.png"});
+    REQUIRE(steep.code == 0);
+    CHECK(printed(steep).error == "masks[0].angle: degrees from -180 to 180");
+
     const auto usage = [&](std::vector<std::string> args) {
         args.insert(args.begin(), {"encode", "--profile", "profile.json"});
         args.insert(args.end(), {"out", "in.png"});
@@ -145,6 +162,8 @@ TEST_CASE("cli: masks, and their options checked") {
     CHECK(usage({"--mask", "0,0,10,10"}) == 2);                                   // no unit
     CHECK(usage({"--mask-unit", "px"}) == 2);                                     // no mask
     CHECK(usage({"--mask", "0,0,10", "--mask-unit", "px"}) == 2);                 // three numbers
+    CHECK(usage({"--mask", "0,0,10,10,x", "--mask-unit", "px"}) == 2);            // not an angle
+    CHECK(usage({"--mask", "0,0,10,10,1,2", "--mask-unit", "px"}) == 2);          // six numbers
     CHECK(usage({"--mask", "0,0,10,10", "--mask-unit", "px", "--mask-style", "erase"}) == 2);
     CHECK(usage({"--mask", "0,0,10,10", "--mask-unit", "px", "--mask-edge", "round"}) == 2);
     CHECK(usage({"--mask-edge", "soft"}) == 2);                                   // no mask

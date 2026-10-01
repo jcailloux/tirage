@@ -2,6 +2,8 @@
 
 #include <doctest/doctest.h>
 
+#include <cmath>
+#include <limits>
 #include <string>
 #include <utility>
 #include <string_view>
@@ -151,6 +153,15 @@ TEST_CASE("mask checks: the crop's rules, a bound, encode only") {
     r.masks[1].x = 0;
     r.masks[0].y = 0;
 
+    // An angle within half a turn either way.
+    r.masks[1].angle = -180;
+    CHECK_FALSE(validate_request(r).has_value());
+    r.masks[1].angle = 180.5;
+    CHECK(refusal(r).message == "masks[1].angle: degrees from -180 to 180");
+    r.masks[1].angle = std::numeric_limits<double>::quiet_NaN();
+    CHECK(refusal(r).message == "masks[1].angle: degrees from -180 to 180");
+    r.masks[1].angle = 0;
+
     r.masks.resize(kMaxMasks, r.masks[0]);
     CHECK_FALSE(validate_request(r).has_value());
     r.masks.push_back(r.masks[0]);
@@ -181,6 +192,49 @@ TEST_CASE("masks: the edge is sharp unless named, and travels by name") {
     CHECK(m.edge == MaskEdge::soft);
     CHECK(glz::read_json(m, R"({"x":1,"y":2,"width":3,"height":4,"unit":"px","edge":"round"})"));
     CHECK(glz::write_json(Mask{.edge = MaskEdge::soft}).value_or("").find(R"("edge":"soft")") != std::string::npos);
+}
+
+TEST_CASE("masks: the angle is 0 unless given") {
+    Mask m;
+    REQUIRE_FALSE(glz::read_json(m, R"({"x":1,"y":2,"width":3,"height":4,"unit":"px"})"));
+    CHECK(m.angle == 0);
+    REQUIRE_FALSE(glz::read_json(m, R"({"x":1,"y":2,"width":3,"height":4,"unit":"px","angle":-12.5})"));
+    CHECK(m.angle == -12.5);
+}
+
+TEST_CASE("sharp_coverage: the rectangle itself, then turned") {
+    // Not tilted: exactly the rectangle's pixels, nothing around.
+    for (int y = -3; y < 13; ++y)
+        for (int x = -3; x < 43; ++x) {
+            CAPTURE(x);
+            CAPTURE(y);
+            CHECK(sharp_coverage(x, y, 40, 10) == ((x >= 0 && x < 40 && y >= 0 && y < 10) ? 1.0 : 0.0));
+        }
+    // A quarter turn clockwise around its centre (20, 5): 10 wide, 40 high,
+    // from (15, -15). The same shape for soft_coverage.
+    for (int y = -18; y < 28; ++y)
+        for (int x = -3; x < 43; ++x) {
+            CAPTURE(x);
+            CAPTURE(y);
+            const bool inside = x >= 15 && x < 25 && y >= -15 && y < 25;
+            CHECK(std::abs(sharp_coverage(x, y, 40, 10, 90) - (inside ? 1.0 : 0.0)) < 1e-9);
+            CHECK(std::abs(soft_coverage(x, y, 40, 10, 90) - soft_coverage(x - 15, y + 15, 10, 40)) < 1e-9);
+        }
+    // An eighth of a turn: the corners of the square are out, the middle of
+    // the box around it in, and the edge between the two is anti-aliased.
+    CHECK(sharp_coverage(20, 20, 40, 40, 45) == 1.0);
+    CHECK(sharp_coverage(0, 0, 40, 40, 45) == 0.0);
+    CHECK(sharp_coverage(20, -5, 40, 40, 45) == 1.0);
+    CHECK(sharp_coverage(20, -10, 40, 40, 45) == 0.0);  // past the turned corner, at 20 - 28.3
+    // Clockwise, as the image's y points down: the right end goes down.
+    CHECK(sharp_coverage(36, 13, 40, 10, 30) == 1.0);
+    CHECK(sharp_coverage(36, -3, 40, 10, 30) == 0.0);
+    CHECK(sharp_coverage(36, -3, 40, 10, -30) == 1.0);
+    CHECK(sharp_coverage(36, 13, 40, 10, -30) == 0.0);
+    for (int x = -5; x < 45; ++x) {
+        const double c = sharp_coverage(x, 3, 40, 40, 17);
+        CHECK((c >= 0 && c <= 1));
+    }
 }
 
 TEST_CASE("soft_coverage: a rounded rectangle, faded towards its border") {
@@ -295,6 +349,27 @@ TEST_CASE("resolve_mask cuts to the image, and may vanish") {
     // Huge values do not overflow.
     const Rect huge = resolve_mask(mask(50, 50, 2'000'000'000, 2'000'000'000), 100, 100);
     CHECK((huge.x == 50 && huge.width == 50 && huge.height == 50));
+
+    // Tilted, the rectangle around the turned mask.
+    const auto tilted = [&](int x, int y, int w, int h, double angle, CropUnit unit = CropUnit::px) {
+        Mask m = mask(x, y, w, h, unit);
+        m.angle = angle;
+        return resolve_mask(m, 200, 100);
+    };
+    const Rect quarter = tilted(50, 40, 100, 20, 90);  // around (100, 50): 20 x 100
+    CHECK((quarter.x == 90 && quarter.y == 0 && quarter.width == 20 && quarter.height == 100));
+    const Rect turned = tilted(50, 40, 100, 20, 180);  // no row nor column more
+    CHECK((turned.x == 50 && turned.y == 40 && turned.width == 100 && turned.height == 20));
+    const Rect eighth = tilted(40, 40, 20, 20, -45);  // half diagonal 14.1 around (50, 50)
+    CHECK((eighth.x == 35 && eighth.y == 35 && eighth.width == 30 && eighth.height == 30));
+    // Permille converted first, then turned: 500 x 200 permille of 200 x 100 is 100 x 20.
+    const Rect permille = tilted(250, 400, 500, 200, 90, CropUnit::permille);
+    CHECK((permille.x == 90 && permille.y == 0 && permille.width == 20 && permille.height == 100));
+    // The box may touch the image when the mask does not: it still comes back.
+    CHECK(tilted(-60, -60, 50, 50, 45).width == 1);
+    // Huge and tilted, cut to the image without overflow.
+    const Rect huge_tilted = tilted(-1'000'000'000, -1'000'000'000, 2'000'000'000, 2'000'000'000, 30);
+    CHECK((huge_tilted.x == 0 && huge_tilted.width == 200 && huge_tilted.height == 100));
 }
 
 TEST_CASE("to_stored: every orientation, checked pixel by pixel") {

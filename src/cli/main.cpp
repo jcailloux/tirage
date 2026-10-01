@@ -1,7 +1,7 @@
 // tirage: the command line client (plan § 5).
 //
 //   tirage encode --profile <profile.json> [--variants a,b] [--crop x,y,w,h --crop-unit px|permille]
-//                 [--mask x,y,w,h ... --mask-unit px|permille [--mask-style blur|pixelate|fill]
+//                 [--mask x,y,w,h[,angle] ... --mask-unit px|permille [--mask-style blur|pixelate|fill]
 //                  [--mask-edge sharp|soft]]
 //                 [--priority interactive|background] <output-dir> <input-file>
 //   tirage probe  --profile <profile.json> [--crop x,y,w,h --crop-unit px|permille] <input-file>
@@ -92,7 +92,7 @@ int usage(const char* why) {
                  "tirage: %s\n"
                  "usage: tirage encode --profile <profile.json> [--variants a,b] "
                  "[--crop x,y,w,h --crop-unit px|permille]\n"
-                 "                     [--mask x,y,w,h ... --mask-unit px|permille "
+                 "                     [--mask x,y,w,h[,angle] ... --mask-unit px|permille "
                  "[--mask-style blur|pixelate|fill]\n"
                  "                      [--mask-edge sharp|soft]]\n"
                  "                     [--priority interactive|background] <output-dir> <input-file>\n"
@@ -126,8 +126,7 @@ std::vector<std::string> split(std::string_view s) {
 }
 
 // x,y,w,h in integers, for --crop and --mask.
-std::optional<std::array<int, 4>> parse_area(const std::string& value) {
-    const auto parts = split(value);
+std::optional<std::array<int, 4>> parse_area(const std::vector<std::string>& parts) {
     if (parts.size() != 4) return std::nullopt;
     std::array<int, 4> v{};
     for (int i = 0; i < 4; ++i) {
@@ -138,6 +137,21 @@ std::optional<std::array<int, 4>> parse_area(const std::string& value) {
     return v;
 }
 
+// --mask: x,y,w,h, then an angle in degrees if the mask is tilted.
+std::optional<std::pair<std::array<int, 4>, double>> parse_mask(const std::string& value) {
+    auto parts = split(value);
+    double angle = 0;
+    if (parts.size() == 5) {
+        const auto& p = parts.back();
+        const auto [end, ec] = std::from_chars(p.data(), p.data() + p.size(), angle);
+        if (ec != std::errc{} || end != p.data() + p.size()) return std::nullopt;
+        parts.pop_back();
+    }
+    const auto area = parse_area(parts);
+    if (!area) return std::nullopt;
+    return std::pair{*area, angle};
+}
+
 std::optional<tirage::CropUnit> parse_unit(const std::string& unit) {
     if (unit == "px") return tirage::CropUnit::px;
     if (unit == "permille") return tirage::CropUnit::permille;
@@ -145,7 +159,7 @@ std::optional<tirage::CropUnit> parse_unit(const std::string& unit) {
 }
 
 std::optional<tirage::Crop> parse_crop(const std::string& value, const std::string& unit) {
-    const auto v = parse_area(value);
+    const auto v = parse_area(split(value));
     const auto u = parse_unit(unit);
     if (!v || !u) return std::nullopt;
     return tirage::Crop{.x = (*v)[0], .y = (*v)[1], .width = (*v)[2], .height = (*v)[3], .unit = u};
@@ -313,16 +327,18 @@ int main(int argc, char** argv) {
         const auto edge = parse_edge(args.mask_edge.value_or("sharp"));
         if (!edge) return usage("--mask-edge is sharp or soft");
         for (const std::string& m : args.masks) {
-            const auto v = parse_area(m);
-            if (!v) return usage("--mask is x,y,w,h in integers");
+            const auto v = parse_mask(m);
+            if (!v) return usage("--mask is x,y,w,h in integers, then an optional angle in degrees");
+            const auto& [area, angle] = *v;
             request.masks.push_back(
-                {.x = (*v)[0],
-                 .y = (*v)[1],
-                 .width = (*v)[2],
-                 .height = (*v)[3],
+                {.x = area[0],
+                 .y = area[1],
+                 .width = area[2],
+                 .height = area[3],
                  .unit = unit,
                  .style = *style,
-                 .edge = *edge});
+                 .edge = *edge,
+                 .angle = angle});
         }
     }
 

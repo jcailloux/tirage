@@ -58,6 +58,11 @@ enum class MaskEdge { sharp, soft };
 // A zone to hide (a user name, an avatar), on the oriented image like the
 // crop, and before it: a zone reaching outside the crop is only partly seen.
 // Its unit is required for the same reason as the crop's.
+//
+// `angle` tilts the zone: degrees clockwise, from -180 to 180, around the
+// rectangle's centre, once in pixels (a permille rectangle is converted first,
+// then turned). The style is computed in the rectangle's own frame, as if the
+// image were turned to straighten it.
 struct Mask {
     int x = 0;
     int y = 0;
@@ -66,7 +71,11 @@ struct Mask {
     std::optional<CropUnit> unit;  // required, checked by validate_request
     MaskStyle style = MaskStyle::blur;
     MaskEdge edge = MaskEdge::sharp;
+    double angle = 0;
 };
+
+// Bound on a mask's angle, in degrees either way.
+inline constexpr double kMaxMaskAngle = 180;
 
 // Bound on the number of masks of one request.
 inline constexpr std::size_t kMaxMasks = 32;
@@ -134,6 +143,7 @@ struct Response {
     std::optional<Source> source;  // absent when refused before decoding
     std::optional<Rect> crop;      // the crop actually applied, once clamped
     std::vector<Rect> masks;       // each mask as applied, in pixels, empty when outside the image
+                                   // (a tilted mask: the rectangle around it)
     std::vector<Output> outputs;   // encode only: variant order, then width, then format
 };
 

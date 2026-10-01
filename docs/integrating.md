@@ -18,7 +18,7 @@ worker, not your back end.
 On Debian 13 (trixie), from a release package:
 
 ```sh
-sudo apt install ./tirage_0.3.1_amd64.deb
+sudo apt install ./tirage_0.4.0_amd64.deb
 ```
 
 This installs the daemon, the `tirage` command, the worker, and starts `tirage.socket`
@@ -59,7 +59,7 @@ include(FetchContent)
 FetchContent_Declare(
     tirage
     GIT_REPOSITORY https://github.com/jcailloux/tirage.git
-    GIT_TAG        v0.3.1
+    GIT_TAG        v0.4.0
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(tirage)

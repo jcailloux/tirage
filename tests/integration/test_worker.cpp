@@ -548,6 +548,77 @@ TEST_CASE("masks: a soft blur leaves no detail inside its fade") {
     CHECK(out.extract_area(0, 75, 240, 25).deviate() > 100);
 }
 
+TEST_CASE("masks: a tilted zone hides itself, not the corners of its box, whatever the EXIF orientation") {
+    // Two ramps: the mean over a zone symmetric around its centre is the
+    // image's value at that centre, wherever the zone is turned, and a zone
+    // misplaced by the orientation has another one.
+    const VImage xy = VImage::xyz(160, 100);
+    const VImage stored = (xy[0] * 1.5).bandjoin(xy[1] * 2.5).bandjoin(xy[0] * 0 + 128)
+                              .cast(VIPS_FORMAT_UCHAR)
+                              .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_sRGB));
+    // 60 x 20 around (68, 40), turned 30° clockwise: its box is (37, 16) to
+    // (99, 64), which fits 160x100 and 100x160.
+    Mask tilted = mask(38, 30, 60, 20, MaskStyle::fill);
+    tilted.angle = 30;
+
+    for (int o = 1; o <= 8; ++o) {
+        CAPTURE(o);
+        VImage tagged = stored.copy();
+        tagged.set("orientation", o);
+        const std::string jpeg =
+            save(tagged, ".jpg", VImage::option()->set("Q", 100)->set("subsample_mode", VIPS_FOREIGN_SUBSAMPLE_OFF));
+        const VImage oriented = decode(jpeg).autorot();
+
+        for (MaskEdge edge : {MaskEdge::sharp, MaskEdge::soft}) {
+            CAPTURE(static_cast<int>(edge));
+            tilted.edge = edge;
+            const Response r = run(exact_jpeg(oriented.width()), jpeg, Operation::encode, std::nullopt, {tilted});
+            REQUIRE_MESSAGE(r.error.empty(), r.error);
+            REQUIRE(r.masks.size() == 1);
+            CHECK((r.masks[0].x == 37 && r.masks[0].y == 16 && r.masks[0].width == 62 && r.masks[0].height == 48));
+            const VImage out = decode(r.outputs.at(0).bytes);
+
+            const std::vector<double> centre = oriented.getpoint(68, 40);
+            using P = std::pair<int, int>;
+            // Along the turned long axis, filled: the centre, and 20 px either way.
+            for (const auto& [x, y] : {P{68, 40}, P{85, 50}, P{50, 30}})
+                CHECK_MESSAGE(near(out, x, y, centre, 4), x, ",", y, ": ", pixel_text(out, x, y));
+            // The corners of the box, outside the turned zone, are the image as it was.
+            for (const auto& [x, y] : {P{40, 18}, P{96, 19}, P{40, 61}, P{96, 61}})
+                CHECK_MESSAGE(near(out, x, y, oriented.getpoint(x, y), 6), x, ",", y, ": ", pixel_text(out, x, y));
+        }
+    }
+}
+
+TEST_CASE("masks: a tilted zone, each style and edge, leaves no detail inside") {
+    const VImage xy = VImage::xyz(300, 200);
+    const VImage checker = ((((xy[0] + xy[1]) % 2) * 255).cast(VIPS_FORMAT_UCHAR))
+                               .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_B_W));
+    for (MaskStyle style : {MaskStyle::blur, MaskStyle::pixelate, MaskStyle::fill})
+        for (MaskEdge edge : {MaskEdge::sharp, MaskEdge::soft}) {
+            CAPTURE(static_cast<int>(style));
+            CAPTURE(static_cast<int>(edge));
+            // 160 x 60 around (150, 100), an eighth of a turn anticlockwise.
+            Mask m = mask(70, 70, 160, 60, style);
+            m.edge = edge;
+            m.angle = -45;
+            const Response r = run(exact_jpeg(300), save(checker, ".png"), Operation::encode, std::nullopt, {m});
+            REQUIRE_MESSAGE(r.error.empty(), r.error);
+            const VImage out = decode(r.outputs.at(0).bytes);
+            // The centre, and 40 px either way along the long axis (up and right).
+            for (const auto& [x, y] : {std::pair{144, 94}, std::pair{172, 66}, std::pair{116, 122}}) {
+                CAPTURE(x);
+                CAPTURE(y);
+                CHECK(out.extract_area(x, y, 12, 12).deviate() < 10);
+                CHECK(std::abs(out.extract_area(x, y, 12, 12).avg() - 127.5) < 10);
+            }
+            // The corners of its box, and past it, the checkerboard itself.
+            CHECK(out.extract_area(80, 40, 30, 30).deviate() > 100);
+            CHECK(out.extract_area(190, 130, 30, 30).deviate() > 100);
+            CHECK(out.extract_area(0, 0, 60, 200).deviate() > 100);
+        }
+}
+
 TEST_CASE("masks on RGBA: transparent pixels lend no colour") {
     // Red on the right half, transparent black on the left: filled as a whole,
     // premultiplied, the mean stays red with half the opacity.
@@ -562,6 +633,16 @@ TEST_CASE("masks on RGBA: transparent pixels lend no colour") {
     const VImage out = decode(r.outputs.at(0).bytes);
     CHECK_MESSAGE(near(out, 30, 50, {255, 0, 0, 128}, 8), pixel_text(out, 30, 50));
     CHECK_MESSAGE(near(out, 170, 50, {255, 0, 0, 128}, 8), pixel_text(out, 170, 50));
+
+    // Tilted, across the edge of the transparency: the same, turned.
+    Mask tilted = mask(40, 30, 120, 40, MaskStyle::fill);
+    tilted.angle = 30;
+    const Response t = run(profile(variant({200}, {OutputFormat::webp}, 100)), save(rgba, ".png"),
+                           Operation::encode, std::nullopt, {tilted});
+    REQUIRE_MESSAGE(t.error.empty(), t.error);
+    const VImage turned = decode(t.outputs.at(0).bytes);
+    CHECK_MESSAGE(near(turned, 85, 45, {255, 0, 0, 128}, 8), pixel_text(turned, 85, 45));
+    CHECK_MESSAGE(near(turned, 115, 55, {255, 0, 0, 128}, 8), pixel_text(turned, 115, 55));
 }
 
 TEST_CASE("masks: with the crop, metadata dropped, a mask outside the image warned") {

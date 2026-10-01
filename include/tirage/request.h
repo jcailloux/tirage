@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <numbers>
 #include <optional>
 #include <set>
 #include <string>
@@ -130,6 +131,8 @@ struct Refusal {
             const Mask& m = r.masks[i];
             if (auto e = check_area(std::format("masks[{}]", i), m.x, m.y, m.width, m.height, m.unit, true))
                 return e;
+            if (!(std::abs(m.angle) <= kMaxMaskAngle))  // NaN included
+                return invalid(std::format("masks[{}].angle: degrees from -180 to 180", i));
         }
     }
 
@@ -184,6 +187,23 @@ namespace detail {
     return {px, py, scale(x + w, width) - px, scale(y + h, height) - py};
 }
 
+// Cosine and sine of an angle in degrees.
+[[nodiscard]] inline std::pair<double, double> turn(double degrees) {
+    const double t = degrees * std::numbers::pi / 180;
+    return {std::cos(t), std::sin(t)};
+}
+
+// Pixel (x, y) of a width x height rectangle tilted by `angle`, measured at
+// the pixel's centre, in the rectangle's own frame: the offsets from its
+// centre along its sides. (x, y) counts from the rectangle's origin before it
+// is turned, so it may be negative or past the rectangle.
+[[nodiscard]] inline std::pair<double, double> untilted(int x, int y, int width, int height, double angle) {
+    const double px = x + 0.5 - width / 2.0, py = y + 0.5 - height / 2.0;
+    if (angle == 0) return {px, py};
+    const auto [c, s] = turn(angle);
+    return {px * c + py * s, -px * s + py * c};
+}
+
 }  // namespace detail
 
 // The crop in pixels, clamped into the image: it always keeps at least one
@@ -201,11 +221,27 @@ namespace detail {
 // A mask in pixels, cut to the image. Unlike a crop it may vanish: a mask
 // entirely outside the image, or thinner than a pixel once in permille, hides
 // nothing and comes back empty (all zero).
+// A tilted mask comes back as the rectangle around it: every pixel it may touch.
 [[nodiscard]] inline Rect resolve_mask(const Mask& m, int width, int height) {
     const Rect p = detail::to_pixels(m.x, m.y, m.width, m.height, m.unit, width, height);
-    const std::int64_t x0 = std::max(p.x, 0), y0 = std::max(p.y, 0);
-    const std::int64_t x1 = std::min<std::int64_t>(std::int64_t{p.x} + p.width, width);
-    const std::int64_t y1 = std::min<std::int64_t>(std::int64_t{p.y} + p.height, height);
+    std::int64_t x0 = p.x, y0 = p.y;
+    std::int64_t x1 = std::int64_t{p.x} + p.width, y1 = std::int64_t{p.y} + p.height;
+    if (m.angle != 0) {
+        const auto [c, s] = detail::turn(m.angle);
+        const double cx = p.x + p.width / 2.0, cy = p.y + p.height / 2.0;
+        const double hw = (p.width * std::abs(c) + p.height * std::abs(s)) / 2;
+        const double hh = (p.width * std::abs(s) + p.height * std::abs(c)) / 2;
+        // A hair of tolerance: cos(90°) is not quite 0, and must not add a row.
+        constexpr double kTolerance = 1e-6;
+        x0 = static_cast<std::int64_t>(std::floor(cx - hw + kTolerance));
+        y0 = static_cast<std::int64_t>(std::floor(cy - hh + kTolerance));
+        x1 = static_cast<std::int64_t>(std::ceil(cx + hw - kTolerance));
+        y1 = static_cast<std::int64_t>(std::ceil(cy + hh - kTolerance));
+    }
+    x0 = std::max<std::int64_t>(x0, 0);
+    y0 = std::max<std::int64_t>(y0, 0);
+    x1 = std::min<std::int64_t>(x1, width);
+    y1 = std::min<std::int64_t>(y1, height);
     if (x1 <= x0 || y1 <= y0) return {};
     return {static_cast<int>(x0), static_cast<int>(y0), static_cast<int>(x1 - x0), static_cast<int>(y1 - y0)};
 }
@@ -219,19 +255,34 @@ inline constexpr int kSoftFadeDivisor = 10;   // fade: shorter side / 10, 1 pixe
 
 // Opacity of a soft mask, from 0 (the image as it was) to 1 (fully hidden), at
 // pixel (x, y) of its width x height rectangle, measured at the pixel's centre.
-// The fade follows a smoothstep: no visible step where it starts or ends.
-[[nodiscard]] inline double soft_coverage(int x, int y, int width, int height) {
+// The fade follows a smoothstep: no visible step where it starts or ends. A
+// mask tilted by `angle` is the same shape turned: (x, y) counts from its
+// origin before it is turned, and may fall outside the rectangle.
+[[nodiscard]] inline double soft_coverage(int x, int y, int width, int height, double angle = 0) {
     const double shorter = std::min(width, height);
     const double radius = shorter / kSoftRadiusDivisor;
     const double fade = std::max(1.0, shorter / kSoftFadeDivisor);
     // Signed distance to the rounded rectangle, negative inside.
-    const double dx = std::abs(x + 0.5 - width / 2.0) - (width / 2.0 - radius);
-    const double dy = std::abs(y + 0.5 - height / 2.0) - (height / 2.0 - radius);
+    const auto [ux, uy] = detail::untilted(x, y, width, height, angle);
+    const double dx = std::abs(ux) - (width / 2.0 - radius);
+    const double dy = std::abs(uy) - (height / 2.0 - radius);
     const double outside = std::hypot(std::max(dx, 0.0), std::max(dy, 0.0));
     const double inside = std::min(std::max(dx, dy), 0.0);
     const double depth = radius - (outside + inside);  // how far inside the border
     const double t = std::clamp(depth / fade, 0.0, 1.0);
     return t * t * (3 - 2 * t);
+}
+
+// Opacity of a sharp mask tilted by `angle`, as soft_coverage counts pixels:
+// 1 inside the rectangle, 0 outside, and its edge anti-aliased over one pixel
+// (the share of the pixel inside, near enough). Not tilted, exactly the
+// rectangle: 1 on each of its pixels, 0 around.
+[[nodiscard]] inline double sharp_coverage(int x, int y, int width, int height, double angle = 0) {
+    const auto [ux, uy] = detail::untilted(x, y, width, height, angle);
+    // Signed distance to the rectangle, negative inside.
+    const double dx = std::abs(ux) - width / 2.0, dy = std::abs(uy) - height / 2.0;
+    const double distance = std::hypot(std::max(dx, 0.0), std::max(dy, 0.0)) + std::min(std::max(dx, dy), 0.0);
+    return std::clamp(0.5 - distance, 0.0, 1.0);
 }
 
 // A rectangle of the oriented image, in the image as stored, before

@@ -43,7 +43,7 @@ their systemd units, as transient units of your user manager: `tests/hardening/c
 
 ```sh
 packaging/build.sh                                        # builds and tests in debian:trixie-slim
-tests/package/check.sh .build/deb/tirage_0.3.1_amd64.deb  # installs it in a trixie container with systemd
+tests/package/check.sh .build/deb/tirage_0.4.0_amd64.deb  # installs it in a trixie container with systemd
 ```
 
 `packaging/build.sh` runs the unit and integration tests in the container, then CPack makes
@@ -54,7 +54,7 @@ encode, an upgrade, removal and purge.
 On the server:
 
 ```sh
-sudo apt install ./tirage_0.3.1_amd64.deb
+sudo apt install ./tirage_0.4.0_amd64.deb
 ```
 
 The package installs `tiraged`, `tirage`, the worker (`/usr/libexec/tirage/tirage-worker`) and three
@@ -118,7 +118,8 @@ export TIRAGE_SOCKET=/tmp/tirage.sock   # else /run/tirage/tirage.sock
 
 Masks hide zones before anything is resized (a user name, an avatar): `--mask x,y,w,h`, as many as
 needed (32 at most), with `--mask-unit px|permille`, `--mask-style blur|pixelate|fill` (blur by
-default) and `--mask-edge sharp|soft` (sharp by default). See [Masks](docs/requests.md#masks).
+default) and `--mask-edge sharp|soft` (sharp by default). A fifth number tilts a mask, in degrees
+clockwise (`--mask 40,12,220,30,-8`). See [Masks](docs/requests.md#masks).
 
 ```sh
 .build/gcc/tirage encode --profile profile.json --mask 40,12,220,30 --mask 20,60,64,64 --mask-unit px out/ shot.png

@@ -163,41 +163,114 @@ inline VImage blurred(const VImage& zone) {
         .embed(0, 0, w, h, VImage::option()->set("extend", VIPS_EXTEND_COPY));
 }
 
+// A zone hidden in `style`, the zone already premultiplied if it has alpha.
+inline VImage hide(const VImage& in, MaskStyle style) {
+    switch (style) {
+        case MaskStyle::blur: return blurred(in);
+        case MaskStyle::pixelate: {
+            const int block = pixelate_block(in.width(), in.height());
+            return cells(in, block, block);
+        }
+        case MaskStyle::fill: break;
+    }
+    return cells(in, in.width(), in.height());
+}
+
 // What replaces a zone. Premultiplied when there is an alpha channel, like
 // resize_to, so that transparent pixels lend no colour.
 inline VImage hidden(const VImage& zone, MaskStyle style) {
     const bool alpha = zone.has_alpha();
-    const VImage in = alpha ? zone.premultiply() : zone;
-    VImage out;
-    switch (style) {
-        case MaskStyle::blur: out = blurred(in); break;
-        case MaskStyle::pixelate: {
-            const int block = pixelate_block(in.width(), in.height());
-            out = cells(in, block, block);
-            break;
-        }
-        case MaskStyle::fill: out = cells(in, in.width(), in.height()); break;
-    }
+    VImage out = hide(alpha ? zone.premultiply() : zone, style);
     if (alpha) out = out.unpremultiply();
     return out.cast(zone.format());
 }
 
-// A soft edge: `patch` (the hidden zone) laid over `zone` (the image as it
-// was) with soft_coverage as opacity. `whole` is the mask's whole rectangle,
-// `z` the part of it inside the image, both as stored. The rounded rectangle
-// is the same under every EXIF orientation (flips and quarter turns only swap
-// its sides), so its opacity is computed as stored, without turning anything.
-inline VImage soften(const VImage& patch, const VImage& zone, const Rect& whole, const Rect& z) {
-    std::vector<unsigned char> alpha(static_cast<std::size_t>(z.width) * z.height);
-    for (int y = 0; y < z.height; ++y)
-        for (int x = 0; x < z.width; ++x)
-            alpha[static_cast<std::size_t>(y) * z.width + x] = static_cast<unsigned char>(
-                std::lround(255 * soft_coverage(z.x - whole.x + x, z.y - whole.y + y, whole.width, whole.height)));
-    const VImage a =
-        VImage::new_from_memory_copy(alpha.data(), alpha.size(), z.width, z.height, 1, VIPS_FORMAT_UCHAR);
+// `patch` (the hidden zone) laid over `zone` (the image as it was), with
+// coverage(x, y) as opacity at each pixel of the zone.
+template <typename Coverage>
+VImage blend(const VImage& patch, const VImage& zone, Coverage coverage) {
+    const int w = zone.width(), h = zone.height();
+    std::vector<unsigned char> alpha(static_cast<std::size_t>(w) * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            alpha[static_cast<std::size_t>(y) * w + x] = static_cast<unsigned char>(std::lround(255 * coverage(x, y)));
+    const VImage a = VImage::new_from_memory_copy(alpha.data(), alpha.size(), w, h, 1, VIPS_FORMAT_UCHAR);
     return ((patch.cast(VIPS_FORMAT_FLOAT) * a + zone.cast(VIPS_FORMAT_FLOAT) * (255 - a)) / 255)
         .rint()
         .cast(zone.format());
+}
+
+// A soft edge: `patch` laid over `zone` with soft_coverage as opacity. `whole`
+// is the mask's whole rectangle, `z` the part of it inside the image, both as
+// stored. The rounded rectangle is the same under every EXIF orientation
+// (flips and quarter turns only swap its sides), so its opacity is computed as
+// stored, without turning anything.
+inline VImage soften(const VImage& patch, const VImage& zone, const Rect& whole, const Rect& z) {
+    return blend(patch, zone, [&](int x, int y) {
+        return soft_coverage(z.x - whole.x + x, z.y - whole.y + y, whole.width, whole.height);
+    });
+}
+
+// The EXIF orientation that undoes `o`: the quarter turns swap, the flips,
+// the half turn and the transpositions undo themselves.
+inline int inverse_orientation(int o) { return o == 6 ? 8 : o == 8 ? 6 : o; }
+
+// A tilted mask, on `piece`: the image's pixels under `z` (the rectangle around
+// the mask, cut to the image), already oriented. `whole` is the mask's
+// rectangle before it is turned, on the oriented image. Unlike a straight
+// mask, the opacity depends on the orientation (a flip mirrors the angle), so
+// the piece is turned upright first and back after.
+//
+// The style is computed in the rectangle's own frame: the piece is resampled
+// there (bilinear), hidden, and turned back. Only the part of the frame over
+// `z` is resampled, so a huge mask costs no more than the image, and, like a
+// straight mask, the style reads the part of the zone inside the image (its
+// rectangle in the frame). Pixels needed past the piece repeat its border.
+inline VImage tilt(const VImage& piece, const Mask& m, const Rect& whole, const Rect& z) {
+    const auto [c, s] = tirage::detail::turn(m.angle);
+    const double cx = whole.x + whole.width / 2.0, cy = whole.y + whole.height / 2.0;
+    // Oriented point to the frame (continuous coordinates, pixel k spans [k, k + 1)).
+    const auto to_frame = [&](double x, double y) -> std::pair<double, double> {
+        return {(x - cx) * c + (y - cy) * s + whole.width / 2.0, -(x - cx) * s + (y - cy) * c + whole.height / 2.0};
+    };
+    double fx0 = whole.width, fy0 = whole.height, fx1 = 0, fy1 = 0;
+    for (const auto& [x, y] : {std::pair{z.x, z.y}, std::pair{z.x + z.width, z.y}, std::pair{z.x, z.y + z.height},
+                              std::pair{z.x + z.width, z.y + z.height}}) {
+        const auto [u, v] = to_frame(x, y);
+        fx0 = std::min(fx0, u), fy0 = std::min(fy0, v), fx1 = std::max(fx1, u), fy1 = std::max(fy1, v);
+    }
+    const int ax = std::max(0, static_cast<int>(std::floor(fx0))), ay = std::max(0, static_cast<int>(std::floor(fy0)));
+    const int aw = std::min(whole.width, static_cast<int>(std::ceil(fx1))) - ax;
+    const int ah = std::min(whole.height, static_cast<int>(std::ceil(fy1))) - ay;
+    if (aw <= 0 || ah <= 0) return piece;  // the rectangle misses the image, only its corner box touches it
+
+    const bool alpha = piece.has_alpha();
+    const VImage in = alpha ? piece.premultiply() : piece;
+    // libvips affine maps pixel indices forward: out = matrix * in + offset.
+    // Piece pixel q is oriented point q + z + 0.5, its frame pixel is
+    // to_frame(that) - 0.5, and the frame is cut from (ax, ay).
+    const auto [ox, oy] = to_frame(z.x + 0.5, z.y + 0.5);
+    const VImage frame = in.affine({c, s, -s, c}, VImage::option()
+                                                      ->set("odx", ox - 0.5 - ax)
+                                                      ->set("ody", oy - 0.5 - ay)
+                                                      ->set("oarea", std::vector<int>{0, 0, aw, ah})
+                                                      ->set("extend", VIPS_EXTEND_COPY))
+                             .copy_memory();
+    const VImage hidden_frame = hide(frame, m.style).copy_memory();
+    // And back: frame pixel f is the frame point f + (ax, ay) + 0.5, turned the other way.
+    const double fx = ax + 0.5 - whole.width / 2.0, fy = ay + 0.5 - whole.height / 2.0;
+    VImage patch = hidden_frame.affine({c, -s, s, c}, VImage::option()
+                                                         ->set("odx", fx * c - fy * s + cx - z.x - 0.5)
+                                                         ->set("ody", fx * s + fy * c + cy - z.y - 0.5)
+                                                         ->set("oarea", std::vector<int>{0, 0, z.width, z.height})
+                                                         ->set("extend", VIPS_EXTEND_COPY));
+    if (alpha) patch = patch.unpremultiply();
+    patch = patch.cast(piece.format());
+
+    const auto coverage = m.edge == MaskEdge::soft ? soft_coverage : sharp_coverage;
+    return blend(patch, piece, [&](int x, int y) {
+        return coverage(z.x - whole.x + x, z.y - whole.y + y, whole.width, whole.height, m.angle);
+    });
 }
 
 // Draws the masks into `img`, the in-memory copy, still as stored. `zones` are
@@ -213,6 +286,15 @@ inline void draw_masks(VImage& img, const std::vector<Mask>& masks, const std::v
         const Rect z = to_stored(zones[i], orientation, img.width(), img.height());
         // In memory before drawing: the patch is read from the image it goes into.
         const VImage zone = img.extract_area(z.x, z.y, z.width, z.height).copy_memory();
+        if (m.angle != 0) {
+            const Rect whole = tirage::detail::to_pixels(m.x, m.y, m.width, m.height, m.unit, width, height);
+            VImage piece = zone.copy();
+            piece.set("orientation", orientation);
+            VImage patch = tilt(piece.autorot().copy_memory(), m, whole, zones[i]).copy();
+            patch.set("orientation", inverse_orientation(orientation));
+            img.draw_image(patch.autorot().copy_memory(), z.x, z.y);
+            continue;
+        }
         VImage patch = hidden(zone, m.style);
         if (m.edge == MaskEdge::soft) {
             const Rect oriented = tirage::detail::to_pixels(m.x, m.y, m.width, m.height, m.unit, width, height);
