@@ -1,13 +1,13 @@
 #pragma once
 
-// libtirage-client (plan § 5): the caller's side of the daemon's socket.
+// libtirage-client (docs/integrating.md): the caller's side of the daemon's socket.
 //
 // Header-only, glaze and the protocol headers, never libvips. A call is
-// synchronous and blocking, made from a thread of the caller (at codiga, the
-// queues of transcode.h): it connects, sends one request, hands each event
+// synchronous and blocking, made from a thread of the caller (a job queue,
+// never a thread that serves requests): it connects, sends one request, hands each event
 // (Queued, Started) to `on_event` as it comes, and returns the final message.
 //
-// The outcomes are the protocol's three final messages (plan § 4), plus the
+// The outcomes are the protocol's three final messages (docs/requests.md), plus the
 // transport:
 //   - Response: success, or a refusal with its code (the request's fault);
 //   - Busy: the daemon did not run the job, send it again later, unchanged;
@@ -131,7 +131,7 @@ public:
         if (*got < body.size()) return std::unexpected(std::string("connection cut in a frame"));
 
         Message m;
-        if (const auto ec = glz::read_beve(m, body))
+        if (const auto ec = glz::read<kReadMessage>(m, body))
             return std::unexpected("unreadable message: " + glz::format_error(ec, body));
         return m;
     }

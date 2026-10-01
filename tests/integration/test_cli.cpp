@@ -52,9 +52,10 @@ struct Run {
     std::string err;
 };
 
-// Runs the CLI in `dir` with `args`, TIRAGE_SOCKET set to `socket` and
-// TIRAGE_DIRECT unset.
-Run cli(const fs::path& dir, const std::string& socket, std::vector<std::string> args) {
+// Runs the CLI (or another `program`) in `dir` with `args`, TIRAGE_SOCKET set
+// to `socket` and TIRAGE_DIRECT unset.
+Run cli(const fs::path& dir, const std::string& socket, std::vector<std::string> args,
+        const char* program = TIRAGE_CLI_PATH) {
     std::vector<std::string> env_strings;
     for (char** e = environ; *e; ++e) {
         const std::string_view v = *e;
@@ -65,7 +66,7 @@ Run cli(const fs::path& dir, const std::string& socket, std::vector<std::string>
     for (auto& s : env_strings) envp.push_back(s.data());
     envp.push_back(nullptr);
 
-    args.insert(args.begin(), TIRAGE_CLI_PATH);
+    args.insert(args.begin(), program);
     std::vector<char*> argv;
     for (auto& a : args) argv.push_back(a.data());
     argv.push_back(nullptr);
@@ -208,4 +209,28 @@ TEST_CASE("cli: status, for a person and in JSON") {
     CHECK(s.queued.size() == 1);
 
     CHECK(cli(d.dir(), d.socket(), {"status", "--verbose"}).code == 2);
+}
+
+TEST_CASE("examples: the documented profile and caller work through the daemon") {
+    Daemon d;
+    write_file(d.dir() / "in.png", png(640, 400));
+    const std::string profile = std::string(TIRAGE_EXAMPLES_DIR) + "/profile.json";
+
+    // Every variant of examples/profile.json, none wider than the image: web at
+    // 480 and 640 (960 capped), in AVIF and WebP, thumb at 320, archive at 640.
+    const Run run = cli(d.dir(), d.socket(), {"encode", "--profile", profile, "out", "in.png"});
+    REQUIRE_MESSAGE(run.code == 0, run.err);
+    const Printed p = printed(run);
+    CHECK_MESSAGE(p.error.empty(), p.error);
+    std::vector<std::string> paths;
+    for (const auto& o : p.outputs) paths.push_back(o.path);
+    CHECK(paths == std::vector<std::string>{"out/archive-640.avif", "out/thumb-320.jpg", "out/web-480.avif",
+                                            "out/web-480.webp", "out/web-640.avif", "out/web-640.webp"});
+
+    const Run example = cli(d.dir(), d.socket(), {profile, "in.png", "example"}, TIRAGE_EXAMPLE_PATH);
+    REQUIRE_MESSAGE(example.code == 0, example.err);
+    CHECK(example.err.find("queued, 0 encode(s) ahead") != std::string::npos);
+    CHECK(read_file(d.dir() / "example/thumb-320.jpg").starts_with("\xFF\xD8\xFF"));
+    CHECK(read_file(d.dir() / "example/web-640.webp").substr(8, 4) == "WEBP");
+    CHECK(fs::exists(d.dir() / "example/archive-640.avif"));
 }

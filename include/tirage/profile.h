@@ -1,6 +1,6 @@
 #pragma once
 
-// The encoding profile: what a caller wants out of an original (plan § 3).
+// The encoding profile: what a caller wants out of an original (docs/profile.md).
 //
 // The profile travels with every request. It is plain data: this header only
 // declares its shape and how glaze reads and writes it. Checking that a profile
@@ -26,7 +26,7 @@ enum class OutputFormat { avif, webp, jpeg };
 enum class FloorPolicy { reject, warn };
 enum class Color { srgb, icc };
 enum class Metadata { strip, keep };
-// libvips subsample_mode, without "auto" (plan § 3: applied as is at any quality).
+// libvips subsample_mode, without "auto": applied as is at any quality.
 enum class Chroma { s420, s444 };
 
 struct MinSize {

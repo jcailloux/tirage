@@ -1,6 +1,6 @@
 #pragma once
 
-// What travels between a caller, the daemon and a worker (plan § 4).
+// What travels between a caller, the daemon and a worker (docs/requests.md).
 //
 // Plain data, like profile.h: the request a caller sends, the response it gets
 // back, and the job a worker reads (the request plus what the daemon adds).
@@ -24,7 +24,7 @@ namespace tirage {
 // Current protocol version. A request with another version is refused.
 inline constexpr int kProtocolVersion = 1;
 
-// status asks the daemon what it is doing: it is not a job (plan § 6).
+// status asks the daemon what it is doing: it is not a job.
 enum class Operation { encode, probe, status };
 enum class Priority { interactive, background };
 enum class CropUnit { px, permille };
@@ -146,7 +146,7 @@ struct Job {
 };
 
 // ---------------------------------------------------------------------------
-// What the daemon sends back on its socket (plan § 4): zero or more events,
+// What the daemon sends back on its socket (docs/requests.md): zero or more events,
 // then exactly one final message (Response, Busy or Failure), then it closes.
 // A status request gets a single Status instead.
 

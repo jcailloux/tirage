@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "daemon/config.h"
 #include "daemon/scheduler.h"
@@ -17,6 +18,31 @@
 using namespace tirage;
 using namespace tirage::daemon;
 using namespace std::chrono_literals;
+
+namespace tirage::test {
+
+// A response and a status from a later daemon, with a field this one does not
+// know. Not in the anonymous namespace: glaze reflection needs linkage.
+struct LaterResponse {
+    std::string error;
+    Code code = Code::ok;
+    std::vector<std::string> warnings;
+    std::optional<Source> source;
+    std::optional<Rect> crop;
+    std::vector<Rect> masks;
+    std::vector<Output> outputs;
+    std::string added_later;
+};
+
+struct LaterStatus {
+    std::string version;
+    int threads = 0;
+    std::string added_later;
+};
+
+using LaterMessage = std::variant<Queued, Started, LaterResponse, Busy, Failure, LaterStatus>;
+
+}  // namespace tirage::test
 
 namespace {
 
@@ -212,6 +238,29 @@ TEST_CASE("messages: each kind survives BEVE") {
     CHECK(std::get<Failure>(round_trip(Failure{"killed"})).message == "killed");
     const Response r = std::get<Response>(round_trip(Response{.error = "no", .code = Code::image_too_small}));
     CHECK(r.code == Code::image_too_small);
+}
+
+TEST_CASE("messages: a caller reads a later daemon's messages, a strict reader would not") {
+    using tirage::test::LaterMessage;
+    const auto beve = [](const LaterMessage& m) {
+        std::string out;
+        REQUIRE_FALSE(glz::write_beve(m, out));
+        return out;
+    };
+
+    const std::string response = beve(tirage::test::LaterResponse{
+        .error = "no", .code = Code::image_too_small, .added_later = "x"});
+    Message back;
+    CHECK(glz::read_beve(back, response));  // what an older client did: unreadable
+    REQUIRE_FALSE(glz::read<kReadMessage>(back, response));
+    REQUIRE(std::holds_alternative<Response>(back));
+    CHECK(std::get<Response>(back).code == Code::image_too_small);
+    CHECK(std::get<Response>(back).error == "no");
+
+    const std::string status = beve(tirage::test::LaterStatus{.version = "9.0.0", .threads = 3, .added_later = "x"});
+    REQUIRE_FALSE(glz::read<kReadMessage>(back, status));
+    REQUIRE(std::holds_alternative<Status>(back));
+    CHECK(std::get<Status>(back).threads == 3);
 }
 
 TEST_CASE("deadline_ms: positive, encode only") {

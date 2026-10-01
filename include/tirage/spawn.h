@@ -1,6 +1,6 @@
 #pragma once
 
-// Launching one tirage-worker (plan § 6), shared by direct mode (direct.h) and
+// Launching one tirage-worker, shared by direct mode (direct.h) and
 // the daemon. POSIX only, no libvips.
 //
 // The job goes to the worker on its standard input, backed by a memfd (neither

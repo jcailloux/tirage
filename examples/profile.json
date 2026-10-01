@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "input": {
+    "formats": ["png", "jpeg", "webp", "heic", "avif"],
+    "min_size": { "width": 320, "height": 200, "policy": "warn" },
+    "limits": { "max_bytes": 26214400 }
+  },
+  "color": "srgb",
+  "metadata": "strip",
+  "encoding": {
+    "avif": { "effort": 4, "chroma": "420" },
+    "webp": { "effort": 4, "sharp_yuv": true }
+  },
+  "variants": {
+    "web": {
+      "widths": [480, 960, 1920],
+      "formats": ["avif", "webp"],
+      "quality": [
+        { "max_width": 960, "avif": 55, "webp": 80 },
+        { "avif": 65, "webp": 82 }
+      ]
+    },
+    "thumb": {
+      "widths": [320],
+      "formats": ["jpeg"],
+      "quality": [ { "jpeg": 82 } ],
+      "encoding": {
+        "jpeg": { "chroma": "444", "progressive": true, "optimize_coding": true, "background": [255, 255, 255] }
+      }
+    },
+    "archive": {
+      "widths": [4096],
+      "formats": ["avif"],
+      "quality": [ { "avif": 80 } ],
+      "encoding": { "avif": { "effort": 6, "bit_depth": 10 } }
+    }
+  }
+}

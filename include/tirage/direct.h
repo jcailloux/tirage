@@ -1,6 +1,6 @@
 #pragma once
 
-// Direct mode (plan § 5): the caller launches tirage-worker itself, without the
+// Direct mode (docs/integrating.md): the caller launches tirage-worker itself, without the
 // daemon. For the development machine and the tests only: a call that goes
 // around the daemon goes around the machine's CPU budget.
 

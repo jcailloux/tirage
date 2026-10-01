@@ -1,6 +1,6 @@
 #pragma once
 
-// Profile validation (plan § 3 and § 6).
+// Profile validation (docs/profile.md).
 //
 // Pure logic, no libvips: the daemon runs it before queueing, the worker again
 // (direct mode goes around the daemon), and the client may run it before

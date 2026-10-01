@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(tirage VERSION 0.3.0 LANGUAGES CXX)
+project(tirage VERSION 0.3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,6 +97,7 @@ if(TIRAGE_BUILD_TOOLS)
             DESTINATION ${TIRAGE_SYSTEMD_UNIT_DIR})
     install(FILES packaging/sysusers.d/tirage.conf DESTINATION ${TIRAGE_SYSUSERS_DIR})
     install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
+    install(DIRECTORY docs examples DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
     set(CPACK_PACKAGE_NAME tirage)
     set(CPACK_PACKAGE_VENDOR jcailloux)
@@ -149,6 +150,12 @@ if(TIRAGE_BUILD_TESTS)
     enable_testing()
     add_test(NAME tirage-tests COMMAND tirage-tests --duration=true)
 
+    # The caller of docs/integrating.md, built so that it keeps compiling
+    # against the headers, and run by the integration harness.
+    add_executable(tirage-example examples/encode.cpp)
+    target_link_libraries(tirage-example PRIVATE tirage::client)
+    target_compile_options(tirage-example PRIVATE ${TIRAGE_WARNINGS})
+
     # Integration harness: runs the real worker through direct mode, then
     # through the daemon, the client and the CLI, on images it builds with
     # libvips, and decodes what came back.
@@ -162,9 +169,11 @@ if(TIRAGE_BUILD_TESTS)
             TIRAGE_WORKER_PATH="$<TARGET_FILE:tirage-worker>"
             TIRAGE_DAEMON_PATH="$<TARGET_FILE:tiraged>"
             TIRAGE_CLI_PATH="$<TARGET_FILE:tirage>"
+            TIRAGE_EXAMPLE_PATH="$<TARGET_FILE:tirage-example>"
+            TIRAGE_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples"
             TIRAGE_VERSION="${PROJECT_VERSION}")
         target_compile_options(tirage-integration PRIVATE ${TIRAGE_WARNINGS})
-        add_dependencies(tirage-integration tirage-worker tiraged tirage)
+        add_dependencies(tirage-integration tirage-worker tiraged tirage tirage-example)
         add_test(NAME tirage-integration COMMAND tirage-integration --duration=true)
         set_tests_properties(tirage-integration PROPERTIES LABELS integration)
     endif()

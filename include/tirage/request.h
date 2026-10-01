@@ -1,7 +1,7 @@
 #pragma once
 
 // Request checks and the decisions a worker takes before touching a pixel
-// (plan § 3 and § 4): format sniffing, safety bounds, crop, masks and floor.
+// (docs/requests.md): format sniffing, safety bounds, crop, masks and floor.
 //
 // Pure logic, no libvips, like validate.h: the daemon runs validate_request
 // before queueing, the worker runs everything again (direct mode goes around
@@ -187,7 +187,7 @@ namespace detail {
 }  // namespace detail
 
 // The crop in pixels, clamped into the image: it always keeps at least one
-// pixel, like codiga's worker.
+// pixel.
 [[nodiscard]] inline Rect resolve_crop(const Crop& c, int width, int height) {
     const auto [x, y, w, h] = detail::to_pixels(c.x, c.y, c.width, c.height, c.unit, width, height);
     Rect r;
@@ -212,8 +212,8 @@ namespace detail {
 
 // The soft edge of a mask (MaskEdge::soft), on its whole rectangle in pixels,
 // before any cut to the image: a rounded rectangle, faded out towards its
-// border. Constants of the contract, like the styles': codiga's editor
-// previews them.
+// border. Constants of the contract, like the styles': a caller may preview
+// them (soft_coverage).
 inline constexpr int kSoftRadiusDivisor = 4;  // corner radius: shorter side / 4
 inline constexpr int kSoftFadeDivisor = 10;   // fade: shorter side / 10, 1 pixel at least
 
@@ -259,8 +259,8 @@ inline constexpr int kSoftFadeDivisor = 10;   // fade: shorter side / 10, 1 pixe
     return {std::min(x0, x1), std::min(y0, y1), std::abs(x1 - x0) + 1, std::abs(y1 - y0) + 1};
 }
 
-// The side of a pixelate block: 8 blocks along the zone's longer side. codiga's
-// editor previews it with the same constant (plan § 7).
+// The side of a pixelate block: 8 blocks along the zone's longer side. A
+// constant of the contract, for a caller's preview.
 [[nodiscard]] inline int pixelate_block(int width, int height) {
     return std::max(1, (std::max(width, height) + 7) / 8);
 }

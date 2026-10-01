@@ -2,7 +2,7 @@
 
 // What a validated profile means for one variant: the encoding settings once
 // the variant's and the profile's overrides are applied, the quality at a
-// given width, and the widths actually produced (plan § 3).
+// given width, and the widths actually produced (docs/profile.md).
 
 #include <algorithm>
 #include <array>
@@ -93,7 +93,7 @@ inline void apply_encoding(ResolvedEncoding& r, const Encoding& e) {
 // Widths produced from a source (or crop) `source_width` wide, ascending. Never
 // upscale: the first width at or above the source is capped to the source, and
 // the wider ones are dropped. A source narrower than every width still gets one
-// output, at its own width (codiga's plannedWidths, policy.h:354).
+// output, at its own width.
 [[nodiscard]] inline std::vector<int> planned_widths(const Variant& variant, int source_width) {
     std::vector<int> targets = variant.widths;
     std::ranges::sort(targets);

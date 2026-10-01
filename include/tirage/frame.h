@@ -1,6 +1,6 @@
 #pragma once
 
-// Framing on the daemon's socket (plan § 4): each frame is a 4-byte
+// Framing on the daemon's socket (docs/requests.md): each frame is a 4-byte
 // little-endian length, then that many bytes of BEVE. A caller sends one
 // Request frame per connection, the daemon answers with Message frames.
 //
@@ -35,6 +35,12 @@ inline constexpr std::int64_t kRequestEnvelope = 1 << 20;
 [[nodiscard]] constexpr std::int64_t max_request_frame(const Bounds& daemon) {
     return daemon.max_bytes + kRequestEnvelope;
 }
+
+// How a caller reads the daemon's messages: unknown keys are skipped, so that a
+// daemon newer than the caller's headers, whose messages carry the fields added
+// since, is still understood. The daemon reads requests strictly instead: a
+// request field it does not know (a mask, say) must never be dropped in silence.
+inline constexpr glz::opts kReadMessage{.format = glz::BEVE, .error_on_unknown_keys = false};
 
 // The largest message frame a caller should accept from the daemon (the daemon
 // holds worker responses to it too). Outputs are compressed images: a whole
