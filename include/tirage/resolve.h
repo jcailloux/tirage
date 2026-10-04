@@ -95,14 +95,20 @@ inline void apply_encoding(ResolvedEncoding& r, const Encoding& e) {
 // Widths produced from a source (or crop) `source_width` wide, ascending. Never
 // upscale: the first width at or above the source is capped to the source, and
 // the wider ones are dropped. A source narrower than every width still gets one
-// output, at its own width.
+// output, at its own width. With min_step, a capped width below min_step times
+// the previous one replaces it: the source's full width is kept, the nearly
+// identical step goes. The targets themselves are min_step apart (validate.h),
+// so only a capped width can fall short.
 [[nodiscard]] inline std::vector<int> planned_widths(const Variant& variant, int source_width) {
     std::vector<int> targets = variant.widths;
     std::ranges::sort(targets);
     std::vector<int> out;
     for (int t : targets) {
         const int w = std::min(t, source_width);
-        out.push_back(w);
+        if (variant.min_step && !out.empty() && w < out.back() * *variant.min_step)
+            out.back() = w;
+        else
+            out.push_back(w);
         if (w == source_width) break;
     }
     return out;

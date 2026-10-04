@@ -8,6 +8,7 @@
 // ignored is refused, because a refusal is better than a surprise.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -169,6 +170,19 @@ inline Result check_variant(const Variant& v, const std::string& path) {
     for (int w : v.widths)
         if (w <= 0) return fail(path + ".widths", "must be positive");
     if (has_duplicates(v.widths)) return fail(path + ".widths", "duplicate width");
+
+    if (v.min_step) {
+        const double step = *v.min_step;
+        if (!(step > 1) || !std::isfinite(step)) return fail(path + ".min_step", "must be above 1");
+        if (v.widths.size() < 2)
+            return fail(path + ".min_step", "needs at least two widths, it would be ignored");
+        std::vector<int> sorted = v.widths;
+        std::ranges::sort(sorted);
+        for (std::size_t i = 1; i < sorted.size(); ++i)
+            if (sorted[i] < sorted[i - 1] * step)
+                return fail(path + ".widths", std::format("{} and {} are closer than min_step",
+                                                          sorted[i - 1], sorted[i]));
+    }
 
     if (v.formats.empty()) return fail(path + ".formats", "must not be empty");
     if (has_duplicates(v.formats)) return fail(path + ".formats", "duplicate format");

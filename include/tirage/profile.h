@@ -93,6 +93,9 @@ struct QualityStep {
 
 struct Variant {
     std::vector<int> widths;
+    // Smallest ratio between two produced widths, above 1. A width capped to the
+    // source that falls short of it replaces the previous one (resolve.h).
+    std::optional<double> min_step;
     std::vector<OutputFormat> formats;
     std::vector<QualityStep> quality;
     std::optional<Encoding> encoding;

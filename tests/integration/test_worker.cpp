@@ -206,6 +206,16 @@ TEST_CASE("widths are capped to the source, in every requested format") {
           std::string("jpegload_buffer"));
 }
 
+TEST_CASE("min_step: a source just past a width replaces it instead of joining it") {
+    Variant v = variant({400, 800, 1600}, {OutputFormat::webp});
+    v.min_step = 1.25;
+    const Response r = encoded(profile(v), save(solid(801, 400, {10, 120, 200}), ".png"));
+    std::vector<int> widths;
+    for (const Output& o : r.outputs) widths.push_back(o.width);
+    CHECK(widths == std::vector{400, 801});
+    CHECK(decode(output(r, OutputFormat::webp, 801).bytes).width() == 801);
+}
+
 TEST_CASE("RGBA: alpha kept in AVIF and WebP, resized premultiplied, flattened in JPEG") {
     // Red, transparent on the left half, and the transparent pixels are black:
     // resizing straight alpha would bleed that black into the red edge.

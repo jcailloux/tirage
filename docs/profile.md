@@ -25,6 +25,7 @@ encoded by the test suite on every build:
   "variants": {
     "web": {
       "widths": [480, 960, 1920],
+      "min_step": 1.25,
       "formats": ["avif", "webp"],
       "quality": [
         { "max_width": 960, "avif": 55, "webp": 80 },
@@ -105,6 +106,7 @@ names.
 | Key | Required | Meaning |
 |---|---|---|
 | `widths` | yes | Target widths in pixels, positive, no duplicates, in any order. |
+| `min_step` | no | Smallest ratio between two produced widths, a number above 1 (from 0.6.0). See below. |
 | `formats` | yes | Output formats among `avif`, `webp`, `jpeg`, no duplicates. Every width is produced in every format. |
 | `quality` | yes | Quality steps, see below. |
 | `encoding` | no | Encoder settings for this variant only, field by field over the profile's. |
@@ -127,6 +129,32 @@ So an image narrower than every width still gets one output, at its own width. W
 
 The height follows the aspect ratio. `tirage::planned_widths(variant, width)` (`resolve.h`) gives the
 same list, if you need to know it before encoding.
+
+### Widths: `min_step`
+
+A source just past a width gives two nearly equal outputs (800 and 801), which cost an encode and
+storage and give a `srcset` nothing. With `min_step`, a width capped to the source that is below
+`min_step` times the previous width **replaces** it: the source's full width is kept, the nearly
+identical step is dropped. Without `min_step`, nothing changes. With
+`"widths": [400, 800, 1600], "min_step": 1.25`:
+
+| Source width | Widths produced |
+|---|---|
+| 2400 | 400, 800, 1600 |
+| 1000 | 400, 800, 1000 |
+| 999 | 400, 999 |
+| 801 | 400, 801 |
+| 500 | 400, 500 |
+| 499 | 499 |
+| 300 | 300 |
+
+- The comparison is `width < previous × min_step`, in double precision.
+- The widths produced are always a subset of those without `min_step`: turning it on only drops
+  widths, it never adds one.
+- The targets themselves must be at least `min_step` apart, so only a capped width can fall short.
+  `[400, 450]` with `min_step: 1.25` is refused, and so is `min_step` on a variant with a single
+  width, where it would do nothing.
+- A daemon older than 0.6.0 refuses a profile that has `min_step`, like any unknown key.
 
 ### Quality steps
 

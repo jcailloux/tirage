@@ -236,7 +236,8 @@ TEST_CASE("examples: the documented profile and caller work through the daemon")
     const std::string profile = std::string(TIRAGE_EXAMPLES_DIR) + "/profile.json";
 
     // Every variant of examples/profile.json, none wider than the image: web at
-    // 480 and 640 (960 capped), in AVIF and WebP, thumb at 320, archive at 640.
+    // 480 and 640 (960 capped, and 640 is past min_step), in AVIF and WebP,
+    // thumb at 320, archive at 640.
     const Run run = cli(d.dir(), d.socket(), {"encode", "--profile", profile, "out", "in.png"});
     REQUIRE_MESSAGE(run.code == 0, run.err);
     const Printed p = printed(run);

@@ -14,6 +14,7 @@
   "variants": {
     "web": {
       "widths": [480, 960, 1920],
+      "min_step": 1.25,
       "formats": ["avif", "webp"],
       "quality": [
         { "max_width": 960, "avif": 55, "webp": 80 },

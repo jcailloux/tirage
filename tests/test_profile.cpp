@@ -6,9 +6,12 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <format>
+#include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "tirage/resolve.h"
 #include "tirage/validate.h"
@@ -385,4 +388,57 @@ TEST_CASE("planned widths never upscale") {
     CHECK(planned_widths(v, 300) == std::vector{300});  // narrower than every width
     Variant master{.widths = {2560}};
     CHECK(planned_widths(master, 1000) == std::vector{1000});  // codiga still gets its master
+}
+
+TEST_CASE("min_step: a capped width too close to the previous one replaces it") {
+    Variant v{.widths = {1600, 400, 800}, .min_step = 1.25};
+    CHECK(planned_widths(v, 2400) == std::vector{400, 800, 1600});
+    CHECK(planned_widths(v, 1800) == std::vector{400, 800, 1600});
+    CHECK(planned_widths(v, 1600) == std::vector{400, 800, 1600});
+    CHECK(planned_widths(v, 1000) == std::vector{400, 800, 1000});  // exactly 1.25 times 800
+    CHECK(planned_widths(v, 999) == std::vector{400, 999});
+    CHECK(planned_widths(v, 801) == std::vector{400, 801});
+    CHECK(planned_widths(v, 800) == std::vector{400, 800});
+    CHECK(planned_widths(v, 500) == std::vector{400, 500});
+    CHECK(planned_widths(v, 499) == std::vector{499});
+    CHECK(planned_widths(v, 300) == std::vector{300});
+
+    // Only ever a subset of the widths produced without it.
+    const Variant without{.widths = v.widths};
+    for (int source = 1; source <= 3000; ++source) {
+        const std::vector<int> with = planned_widths(v, source);
+        const std::vector<int> plain = planned_widths(without, source);
+        CHECK(std::ranges::includes(plain, with));
+        CHECK(with.back() == plain.back());  // the source's full width is kept
+    }
+}
+
+TEST_CASE("min_step is above 1, with targets at least that far apart") {
+    Profile p = minimal();
+    Variant& v = p.variants.at("v");
+    v.widths = {400, 800, 1600};
+    v.min_step = 1.25;
+    CHECK_FALSE(validate(p).has_value());
+    v.min_step = 2;  // exactly 2 apart is enough
+    CHECK_FALSE(validate(p).has_value());
+    v.min_step = 2.01;
+    CHECK(error_path(p) == "variants.v.widths");
+    v.min_step = 1;
+    CHECK(error_path(p) == "variants.v.min_step");
+    v.min_step = 0.5;
+    CHECK(error_path(p) == "variants.v.min_step");
+    v.min_step = std::numeric_limits<double>::quiet_NaN();
+    CHECK(error_path(p) == "variants.v.min_step");
+    v.min_step = std::numeric_limits<double>::infinity();
+    CHECK(error_path(p) == "variants.v.min_step");
+    v.min_step = 1.25;
+    v.widths = {450, 400};
+    CHECK(error_path(p) == "variants.v.widths");
+    v.widths = {400};  // nothing to step from: it would do nothing
+    CHECK(error_path(p) == "variants.v.min_step");
+
+    auto read = parse_profile(R"({"version":1,"input":{"formats":["png"]},
+        "variants":{"v":{"widths":[400,800],"min_step":1.25,"formats":["webp"],"quality":[{"webp":80}]}}})");
+    REQUIRE(read.has_value());
+    CHECK(read->variants.at("v").min_step == 1.25);
 }
