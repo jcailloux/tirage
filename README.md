@@ -20,8 +20,9 @@ JPEG, WebP, HEIC and AVIF. Output: AVIF, WebP and JPEG.
 
 ## Build and test
 
-Needs libvips >= 8.16 with its C++ binding (`libvips-dev` on Debian, `vips-devel` on Fedora) for
-`tirage-worker`. Everything else is fetched by CMake.
+Needs libvips >= 8.16 with its C++ binding, libheif and libaom (`libvips-dev libheif-dev libaom-dev`
+on Debian, `vips-devel libheif-devel libaom-devel` on Fedora) for `tirage-worker`, which writes AVIF
+through libheif itself. Everything else is fetched by CMake.
 
 ```sh
 cmake -S . -B .build/gcc -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -43,7 +44,7 @@ their systemd units, as transient units of your user manager: `tests/hardening/c
 
 ```sh
 packaging/build.sh                                        # builds and tests in debian:trixie-slim
-tests/package/check.sh .build/deb/tirage_0.4.0_amd64.deb  # installs it in a trixie container with systemd
+tests/package/check.sh .build/deb/tirage_0.5.0_amd64.deb  # installs it in a trixie container with systemd
 ```
 
 `packaging/build.sh` runs the unit and integration tests in the container, then CPack makes
@@ -54,7 +55,7 @@ encode, an upgrade, removal and purge.
 On the server:
 
 ```sh
-sudo apt install ./tirage_0.4.0_amd64.deb
+sudo apt install ./tirage_0.5.0_amd64.deb
 ```
 
 The package installs `tiraged`, `tirage`, the worker (`/usr/libexec/tirage/tirage-worker`) and three

@@ -17,6 +17,7 @@ struct ResolvedAvif {
     int effort = 4;
     Chroma chroma = Chroma::s420;
     int bit_depth = 8;
+    Tune tune = Tune::ssim;
 };
 
 struct ResolvedWebp {
@@ -51,6 +52,7 @@ inline void apply_encoding(ResolvedEncoding& r, const Encoding& e) {
         apply(r.avif.effort, e.avif->effort);
         apply(r.avif.chroma, e.avif->chroma);
         apply(r.avif.bit_depth, e.avif->bit_depth);
+        apply(r.avif.tune, e.avif->tune);
     }
     if (e.webp) {
         apply(r.webp.effort, e.webp->effort);

@@ -8,7 +8,7 @@
   "color": "srgb",
   "metadata": "strip",
   "encoding": {
-    "avif": { "effort": 4, "chroma": "420" },
+    "avif": { "effort": 4, "chroma": "420", "tune": "ssim" },
     "webp": { "effort": 4, "sharp_yuv": true }
   },
   "variants": {

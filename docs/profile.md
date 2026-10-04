@@ -19,7 +19,7 @@ encoded by the test suite on every build:
   "color": "srgb",
   "metadata": "strip",
   "encoding": {
-    "avif": { "effort": 4, "chroma": "420" },
+    "avif": { "effort": 4, "chroma": "420", "tune": "ssim" },
     "webp": { "effort": 4, "sharp_yuv": true }
   },
   "variants": {
@@ -155,6 +155,7 @@ below.
 | AVIF | `effort` | 0 to 9 (slower, smaller) | 4 |
 | | `chroma` | `"420"`, `"444"` | `"420"` |
 | | `bit_depth` | 8, 10 | 8 |
+| | `tune` | `"ssim"`, `"iq"` (from 0.5.0) | `"ssim"` |
 | WebP | `effort` | 0 to 6 | 4 |
 | | `sharp_yuv` | boolean | `false` |
 | JPEG | `chroma` | `"420"`, `"444"` | `"420"` |
@@ -170,6 +171,17 @@ Notes:
   JPEG has no `effort`.
 - A 10-bit AVIF keeps the precision of a 16-bit source and reduces banding in gradients. Any other
   output is made from 8 bits per sample.
+- `tune` is the tuning of the aom AV1 encoder:
+  - `"ssim"` is the output tirage has always made: SSIM for the colour planes and PSNR for alpha
+    (SSIM rings on alpha). libheif decides the latter.
+  - `"iq"` is libaom's still-image mode (libaom 3.12 and later), which gives a better perceived
+    quality for the same weight. It applies to alpha too: aom has a single tuning for both.
+  - **The quality scale shifts with `iq`**: at the same quality, `iq` makes larger files. Measured
+    on screenshots in 10 bits 4:2:0, `iq` at 70 weighs about what `ssim` at 80 weighs at 1600 px,
+    and `iq` at 40 about `ssim` at 50 at 800 px. Recalibrate your qualities when you switch.
+  - **`iq` moves with libaom**: `ssim` gives the same bytes from libaom 3.12 to 3.13, `iq` does not.
+    An update of libaom on the server can move the size and quality curve of an `iq` profile.
+  - A daemon older than 0.5.0 refuses a profile that has `tune`, like any unknown key.
 - An `encoding` block for a format the variant (or, at the top level, any variant) does not produce
   is refused.
 

@@ -19,10 +19,12 @@
 #include <format>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <vips/vips8>
 
+#include "avif.h"
 #include "tirage/protocol.h"
 #include "tirage/request.h"
 #include "tirage/resolve.h"
@@ -312,19 +314,17 @@ inline int subsample(Chroma c) {
 inline std::string encode(const VImage& img, OutputFormat format, int quality,
                           const ResolvedEncoding& e, int keep) {
     VImage in = img;
+    if (format == OutputFormat::avif) {
+        // Our own writer, for tune (avif.cpp). A 16-bit source goes to a
+        // 10-bit AVIF as is: it keeps its precision.
+        if (e.avif.bit_depth == 8) in = to_8bit(in);
+        return write_avif(in, quality, e.avif, keep);
+    }
+
     const char* suffix = "";
     vips::VOption* options = VImage::option()->set("Q", quality)->set("keep", keep);
-
     switch (format) {
-        case OutputFormat::avif:
-            suffix = ".avif";
-            // A 16-bit source goes to a 10-bit AVIF as is: libvips keeps its precision.
-            if (e.avif.bit_depth == 8) in = to_8bit(in);
-            options->set("compression", VIPS_FOREIGN_HEIF_COMPRESSION_AV1)
-                ->set("effort", e.avif.effort)
-                ->set("subsample_mode", subsample(e.avif.chroma))
-                ->set("bitdepth", e.avif.bit_depth);
-            break;
+        case OutputFormat::avif: std::unreachable();
         case OutputFormat::webp:
             suffix = ".webp";
             in = to_8bit(in);

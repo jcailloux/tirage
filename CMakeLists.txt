@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(tirage VERSION 0.4.0 LANGUAGES CXX)
+project(tirage VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,9 +60,13 @@ if(TIRAGE_BUILD_TOOLS)
 
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(VIPS REQUIRED IMPORTED_TARGET vips-cpp>=8.16)
+    # The worker writes AVIF through libheif itself, for the aom encoder's tune
+    # (src/worker/avif.cpp), and asks libaom its version.
+    pkg_check_modules(HEIF REQUIRED IMPORTED_TARGET libheif>=1.19)
+    pkg_check_modules(AOM REQUIRED IMPORTED_TARGET aom>=3.12)
 
-    add_executable(tirage-worker src/worker/main.cpp)
-    target_link_libraries(tirage-worker PRIVATE tirage::profile PkgConfig::VIPS)
+    add_executable(tirage-worker src/worker/main.cpp src/worker/avif.cpp)
+    target_link_libraries(tirage-worker PRIVATE tirage::profile PkgConfig::VIPS PkgConfig::HEIF PkgConfig::AOM)
     target_compile_definitions(tirage-worker PRIVATE TIRAGE_VERSION="${PROJECT_VERSION}")
     target_compile_options(tirage-worker PRIVATE ${TIRAGE_WARNINGS})
 

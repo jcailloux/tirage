@@ -6,6 +6,7 @@
 
 #include <doctest/doctest.h>
 
+#include <format>
 #include <string>
 #include <string_view>
 
@@ -27,7 +28,7 @@ constexpr std::string_view kExample = R"({
   "color": "srgb",
   "metadata": "strip",
   "encoding": {
-    "avif": { "effort": 4, "chroma": "420", "bit_depth": 8 },
+    "avif": { "effort": 4, "chroma": "420", "bit_depth": 8, "tune": "ssim" },
     "webp": { "effort": 4, "sharp_yuv": false }
   },
   "variants": {
@@ -40,7 +41,7 @@ constexpr std::string_view kExample = R"({
       "widths": [2560],
       "formats": ["avif"],
       "quality": [ { "avif": 80 } ],
-      "encoding": { "avif": { "bit_depth": 10 } }
+      "encoding": { "avif": { "bit_depth": 10, "tune": "iq" } }
     }
   }
 })";
@@ -303,6 +304,20 @@ TEST_CASE("AVIF bit depth is 8 or 10") {
     CHECK_FALSE(validate(p).has_value());
 }
 
+TEST_CASE("AVIF tune is ssim or iq, nothing else") {
+    const auto with_tune = [](std::string_view tune) {
+        return std::format(R"({{"version":1,"input":{{"formats":["png"]}},
+            "encoding":{{"avif":{{"tune":"{}"}}}},
+            "variants":{{"v":{{"widths":[400],"formats":["avif"],"quality":[{{"avif":60}}]}}}}}})",
+                           tune);
+    };
+    CHECK(parse_profile(with_tune("ssim"))->encoding->avif->tune == Tune::ssim);
+    CHECK(parse_profile(with_tune("iq"))->encoding->avif->tune == Tune::iq);
+    // psnr exists in aom, tirage does not expose it.
+    parse_error(with_tune("psnr"));
+    parse_error(with_tune("auto"));
+}
+
 TEST_CASE("JPEG background channels are bytes") {
     Profile p = minimal();
     Variant& v = p.variants.at("v");
@@ -340,10 +355,13 @@ TEST_CASE("encoding resolves field by field: defaults, then profile, then varian
     const ResolvedEncoding tiers = resolve_encoding(*p, p->variants.at("tiers"));
     CHECK(tiers.avif.bit_depth == 8);
     CHECK(tiers.avif.effort == 4);
+    CHECK(tiers.avif.tune == Tune::ssim);
 
     const ResolvedEncoding master = resolve_encoding(*p, p->variants.at("master"));
     CHECK(master.avif.bit_depth == 10);                // variant override
     CHECK(master.avif.chroma == Chroma::s420);         // kept from the profile
+    CHECK(master.avif.tune == Tune::iq);               // variant override
+    CHECK(resolve_encoding(minimal(), minimal().variants.at("v")).avif.tune == Tune::ssim);  // tirage default
     CHECK(master.jpeg.background == std::array{255, 255, 255});  // tirage default
 }
 

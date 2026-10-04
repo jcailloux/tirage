@@ -28,6 +28,11 @@ enum class Color { srgb, icc };
 enum class Metadata { strip, keep };
 // libvips subsample_mode, without "auto": applied as is at any quality.
 enum class Chroma { s420, s444 };
+// The aom encoder's tuning. ssim leaves libheif's choice alone, which is SSIM
+// for colour and PSNR for alpha with libaom < 3.13: tirage's output before
+// tune existed. iq is libaom's still-image mode (libaom >= 3.12), for colour
+// and alpha alike.
+enum class Tune { ssim, iq };
 
 struct MinSize {
     int width = 0;
@@ -55,6 +60,7 @@ struct AvifEncoding {
     std::optional<int> effort;  // 0 to 9
     std::optional<Chroma> chroma;
     std::optional<int> bit_depth;  // 8 or 10
+    std::optional<Tune> tune;
 };
 
 // No chroma: libwebp's lossy mode is always 4:2:0, sharp_yuv is its only knob.
@@ -107,6 +113,12 @@ template <>
 struct glz::meta<tirage::Chroma> {
     static constexpr std::array keys{"420", "444"};
     static constexpr std::array value{tirage::Chroma::s420, tirage::Chroma::s444};
+};
+
+template <>
+struct glz::meta<tirage::Tune> {
+    using enum tirage::Tune;
+    static constexpr auto value = glz::enumerate(ssim, iq);
 };
 
 template <>

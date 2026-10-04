@@ -22,6 +22,7 @@
 
 #include "tirage/direct.h"
 #include "tirage/protocol.h"
+#include "tirage/resolve.h"
 
 using namespace tirage;
 using vips::VImage;
@@ -770,4 +771,151 @@ TEST_CASE("AVIF in: a caller's own master, cropped and encoded again") {
         CHECK(img.height() == 240);
         CHECK(near(img, 100, 100, {200, 40, 30}, 12));
     }
+}
+
+// ---------------------------------------------------------------------------
+// The AVIF writer (src/worker/avif.cpp) against libvips' heifsave, which wrote
+// every AVIF before tune existed.
+
+namespace {
+
+// What heifsave made of `input` before tirage had its own writer: the worker's
+// steps when nothing is converted (no resize, no colour conversion), then
+// heifsave with the options the worker passed it.
+std::string heifsave(const std::string& input, int quality, const ResolvedAvif& a, int keep) {
+    VImage img = decode(input).autorot();
+    if (a.bit_depth == 8 && img.format() == VIPS_FORMAT_USHORT)
+        img = img.cast(VIPS_FORMAT_UCHAR, VImage::option()->set("shift", true))
+                  .copy(VImage::option()->set("interpretation", img.bands() <= 2 ? VIPS_INTERPRETATION_B_W
+                                                                                 : VIPS_INTERPRETATION_sRGB));
+    return save(img, ".avif",
+                VImage::option()
+                    ->set("Q", quality)
+                    ->set("keep", keep)
+                    ->set("compression", VIPS_FOREIGN_HEIF_COMPRESSION_AV1)
+                    ->set("effort", a.effort)
+                    ->set("subsample_mode", a.chroma == Chroma::s420 ? VIPS_FOREIGN_SUBSAMPLE_ON
+                                                                     : VIPS_FOREIGN_SUBSAMPLE_OFF)
+                    ->set("bitdepth", a.bit_depth));
+}
+
+// The worker's AVIF of `input` at its own width.
+std::string worker_avif(std::string input, int width, int quality, const ResolvedAvif& a, Color color,
+                        Metadata metadata) {
+    Variant v = variant({width}, {OutputFormat::avif}, quality);
+    v.encoding = Encoding{.avif = AvifEncoding{.effort = a.effort, .chroma = a.chroma, .bit_depth = a.bit_depth,
+                                               .tune = a.tune}};
+    Profile p = profile(v);
+    p.input.formats.push_back(InputFormat::avif);
+    p.color = color;
+    p.metadata = metadata;
+    const Response r = encoded(p, std::move(input));
+    REQUIRE(r.outputs.size() == 1);
+    return r.outputs[0].bytes;
+}
+
+// A photo-like source: gradients and noise, so that the encoder has choices
+// to make and a difference between tunes shows.
+VImage photo(int width, int height) {
+    const VImage xy = VImage::xyz(width, height);
+    const VImage r = xy[0] * (255.0 / width);
+    const VImage g = xy[1] * (255.0 / height);
+    const VImage b = VImage::gaussnoise(width, height, VImage::option()->set("mean", 128)->set("sigma", 40));
+    return r.bandjoin(g)
+        .bandjoin(b)
+        .cast(VIPS_FORMAT_UCHAR)
+        .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_sRGB))
+        .copy_memory();
+}
+
+// An alpha band with texture: a smooth one encodes the same under any tune.
+VImage textured_alpha(int width, int height) {
+    return ((VImage::xyz(width, height)[0] * (255.0 / width)) * 0.5 +
+            VImage::gaussnoise(width, height, VImage::option()->set("mean", 64)->set("sigma", 30)))
+        .cast(VIPS_FORMAT_UCHAR)
+        .copy_memory();
+}
+
+}  // namespace
+
+TEST_CASE("AVIF: tune ssim writes heifsave's bytes, whatever the image and the settings") {
+    // The worker encodes with 2 threads (run), and libheif hands aom as many.
+    const int concurrency = vips_concurrency_get();
+    vips_concurrency_set(2);
+
+    const VImage rgb = photo(301, 203);
+    const VImage alpha = textured_alpha(301, 203);
+    const VImage rgba = rgb.bandjoin(alpha).copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_sRGB));
+    const VImage grey = rgb.colourspace(VIPS_INTERPRETATION_B_W);
+    const VImage rgb16 = (rgb.cast(VIPS_FORMAT_USHORT) * 257)
+                             .cast(VIPS_FORMAT_USHORT)
+                             .copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_RGB16));
+
+    // Metadata: EXIF, XMP and a Display P3 profile, in a JPEG.
+    VImage tagged = rgb.icc_transform("p3").copy();
+    tagged.set("exif-ifd0-Make", "tirage test");
+    const std::string xmp = R"(<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/></x:xmpmeta>)";
+    vips_image_set_blob_copy(tagged.get_image(), VIPS_META_XMP_NAME, xmp.data(), xmp.size());
+    const std::string jpeg = save(tagged, ".jpg", VImage::option()->set("Q", 95));
+    REQUIRE(has_exif(decode(jpeg)));
+    REQUIRE(has_icc(decode(jpeg)));
+    REQUIRE(decode(jpeg).get_typeof(VIPS_META_XMP_NAME) != 0);
+
+    struct Case {
+        std::string name;
+        std::string input;
+        ResolvedAvif avif;
+        int quality = 60;
+        Color color = Color::srgb;
+        Metadata metadata = Metadata::strip;
+    };
+    const std::vector<Case> cases = {
+        {"RGB, 8 bits, 4:2:0", save(rgb, ".png"), {}},
+        {"RGB, 10 bits, 4:4:4", save(rgb, ".png"), {.effort = 2, .chroma = Chroma::s444, .bit_depth = 10}, 85},
+        {"RGBA, 8 bits", save(rgba, ".png"), {}},
+        {"RGBA, 10 bits", save(rgba, ".png"), {.bit_depth = 10}, 40},
+        {"grey", save(grey, ".png"), {}},
+        {"grey and alpha, 10 bits", save(grey.bandjoin(alpha), ".png"), {.bit_depth = 10}},
+        {"16-bit RGB, 10 bits", save(rgb16, ".png", VImage::option()->set("bitdepth", 16)), {.bit_depth = 10}},
+        {"16-bit RGB, 8 bits", save(rgb16, ".png", VImage::option()->set("bitdepth", 16)), {}},
+        {"ICC kept", jpeg, {}, 60, Color::icc},
+        {"EXIF and XMP kept", jpeg, {.bit_depth = 10}, 60, Color::icc, Metadata::keep},
+        {"AVIF in", save(rgb, ".avif", VImage::option()->set("Q", 90)), {}},
+    };
+    for (const Case& c : cases) {
+        CAPTURE(c.name);
+        int keep = VIPS_FOREIGN_KEEP_NONE;
+        if (c.color == Color::icc) keep |= VIPS_FOREIGN_KEEP_ICC;
+        if (c.metadata == Metadata::keep)
+            keep |= VIPS_FOREIGN_KEEP_EXIF | VIPS_FOREIGN_KEEP_XMP | VIPS_FOREIGN_KEEP_IPTC;
+        const VImage source = decode(c.input);
+        const std::string ours = worker_avif(c.input, source.width(), c.quality, c.avif, c.color, c.metadata);
+        const std::string theirs = heifsave(c.input, c.quality, c.avif, keep);
+        CHECK(ours.size() == theirs.size());
+        CHECK(ours == theirs);
+    }
+
+    vips_concurrency_set(concurrency);
+}
+
+TEST_CASE("AVIF: tune iq is applied, on colour and alpha") {
+    const int concurrency = vips_concurrency_get();
+    vips_concurrency_set(2);
+    const VImage rgb = photo(301, 203);
+    const VImage alpha = textured_alpha(301, 203);
+    for (const VImage& img :
+         {rgb, rgb.bandjoin(alpha).copy(VImage::option()->set("interpretation", VIPS_INTERPRETATION_sRGB))}) {
+        CAPTURE(img.bands());
+        const std::string png = save(img, ".png");
+        const ResolvedAvif ssim{.bit_depth = 10};
+        const ResolvedAvif iq{.bit_depth = 10, .tune = Tune::iq};
+        const std::string a = worker_avif(png, 301, 60, ssim, Color::srgb, Metadata::strip);
+        const std::string b = worker_avif(png, 301, 60, iq, Color::srgb, Metadata::strip);
+        CHECK(a != b);
+        const VImage decoded = decode(b);
+        CHECK(decoded.width() == 301);
+        CHECK(decoded.bands() == img.bands());
+        CHECK(near(decoded / 257, 150, 100, img.getpoint(150, 100), 40));
+    }
+    vips_concurrency_set(concurrency);
 }
