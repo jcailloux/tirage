@@ -285,6 +285,19 @@ int build(VipsObject* object) {
     return 0;
 }
 
+// RGB or RGBA, heifsave's saveable, for the libvips loaded at run time and not
+// the one compiled against: libvips 8.17 turned the VipsSaveable enum into
+// VipsForeignSaveable flags without changing its soname, and the 3 of 8.16's
+// RGBA_ONLY reads MONO | RGB from then on, the alpha silently dropped before
+// the writer is called. Hence the raw values of both, whatever the headers.
+int rgba_saveable() {
+    constexpr int kRgbaOnly816 = 3;      // VIPS_SAVEABLE_RGBA_ONLY up to 8.16
+    constexpr int kRgbAlpha817 = 2 | 8;  // VIPS_FOREIGN_SAVEABLE_RGB | _ALPHA from 8.17
+    const int major = vips_version(0);
+    const int minor = vips_version(1);
+    return major > 8 || (major == 8 && minor >= 17) ? kRgbAlpha817 : kRgbaOnly816;
+}
+
 // Except for 8-bit inputs, everything goes to 16 bits (heifsave's table).
 VipsBandFormat band_formats[10] = {
     // UC           C                 US                 S                  UI
@@ -306,12 +319,7 @@ void tirage_avif_save_class_init(AvifSaveClass* klass) {
     object_class->description = "save image in AVIF format with the aom encoder";
     object_class->build = build;
 
-#if VIPS_MAJOR_VERSION > 8 || (VIPS_MAJOR_VERSION == 8 && VIPS_MINOR_VERSION >= 17)
-    // libvips 8.17 reworked the saveable flags: heifsave's from then on.
-    save_class->saveable = static_cast<VipsForeignSaveable>(VIPS_FOREIGN_SAVEABLE_RGB | VIPS_FOREIGN_SAVEABLE_ALPHA);
-#else
-    save_class->saveable = VIPS_SAVEABLE_RGBA_ONLY;
-#endif
+    save_class->saveable = static_cast<decltype(save_class->saveable)>(rgba_saveable());
     save_class->format_table = band_formats;
 }
 
